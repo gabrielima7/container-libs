@@ -60,6 +60,27 @@ func TestUsageNonemptyFile(t *testing.T) {
 	})
 }
 
+func TestUsageSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	unexpectedDir := t.TempDir()
+	err := os.WriteFile(filepath.Join(unexpectedDir, "file1"), []byte("this should not be counted"), 0o600)
+	require.NoError(t, err)
+	err = os.WriteFile(filepath.Join(unexpectedDir, "file2"), []byte("this should not be counted either"), 0o600)
+	require.NoError(t, err)
+
+	symlink := filepath.Join(dir, "symlink")
+	err = os.Symlink(unexpectedDir, symlink)
+	require.NoError(t, err)
+
+	usage, err := Usage(symlink)
+	require.NoError(t, err)
+	expectSizeAndInodeCount(t, "one symlink", usage, &DiskUsage{
+		Size:       int64(len(unexpectedDir)),
+		InodeCount: 1,
+	})
+}
+
 // Usage of an empty directory should be 0
 func TestUsageEmptyDirectory(t *testing.T) {
 	usage, err := Usage(t.TempDir())
