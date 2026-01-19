@@ -1,6 +1,10 @@
 package system
 
 import (
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -44,6 +48,40 @@ func Lgetxattr(path string, attr string) ([]byte, error) {
 		return nil, err
 	}
 	return ExtattrGetLink(path, namespace, extattr)
+}
+
+// RootLgetxattr retrieves the value of the extended attribute identified by attr
+// in fsPath (per fs.ValidPath) under root.
+// Returns a []byte slice if the xattr is set and nil otherwise.
+func RootLgetxattr(root *os.Root, fsPath string, attr string) ([]byte, error) {
+	// O_PATH value on freebsd. We must define O_PATH ourselves
+	// until https://github.com/golang/go/issues/54355 is fixed.
+	const O_PATH = 0x00400000 //nolint:staticcheck // ST1003: should not use ALL_CAPS
+
+	// We can’t use root.Open(fsPath) because it follows trailing symlinks.
+	parentDir, err := root.Open(path.Dir(fsPath))
+	if err != nil {
+		return nil, err
+	}
+	defer parentDir.Close()
+	// A path per fs.ValidPath should not contain a ".."; reject it so that we can ensure no escape from parentDir.
+	fsBase := path.Base(fsPath)
+	if fsBase == ".." {
+		return nil, fmt.Errorf("trailing .. in RootLgetxattr(%q)", fsPath)
+	}
+	fd, err := syscallConnControl(parentDir, func(parentDir uintptr) (int, error) {
+		return unix.Openat(int(parentDir), filepath.FromSlash(fsBase), O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+
+	namespace, extattr, err := xattrToExtattr(attr)
+	if err != nil {
+		return nil, err
+	}
+	return extattrGetFd(fd, namespace, extattr)
 }
 
 // Lsetxattr sets the value of the extended attribute identified by attr

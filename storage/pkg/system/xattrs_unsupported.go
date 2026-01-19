@@ -2,7 +2,10 @@
 
 package system
 
-import "syscall"
+import (
+	"os"
+	"syscall"
+)
 
 const (
 	// Value is larger than the maximum size allowed
@@ -17,6 +20,13 @@ const (
 
 // Lgetxattr is not supported on platforms other than linux.
 func Lgetxattr(path string, attr string) ([]byte, error) {
+	return nil, ErrNotSupportedPlatform
+}
+
+// RootLgetxattr retrieves the value of the extended attribute identified by attr
+// in fsPath (per fs.ValidPath) under root.
+// Returns a []byte slice if the xattr is set and nil otherwise.
+func RootLgetxattr(root *os.Root, fsPath string, attr string) ([]byte, error) {
 	return nil, ErrNotSupportedPlatform
 }
 
