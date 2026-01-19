@@ -421,8 +421,8 @@ func ChangesDirs(newDir string, newMappings *idtools.IDMappings, oldDir string, 
 	return newRoot.Changes(oldRoot), nil
 }
 
-// ChangesSize calculates the size in bytes of the provided changes, based on newDir.
-func ChangesSize(newDir string, changes []Change) int64 {
+// ChangesSizeWithError calculates the size in bytes of the provided changes, based on newDir.
+func ChangesSizeWithError(newDir string, changes []Change) (int64, error) {
 	var (
 		size int64
 		sf   = make(map[uint64]struct{})
@@ -448,6 +448,17 @@ func ChangesSize(newDir string, changes []Change) int64 {
 				}
 			}
 		}
+	}
+	return size, nil
+}
+
+// ChangesSize calculates the size in bytes of the provided changes, based on newDir.
+//
+// Deprecated: Use ChangesSizeWithError.
+func ChangesSize(newDir string, changes []Change) int64 {
+	size, err := ChangesSizeWithError(newDir, changes)
+	if err != nil {
+		return 0
 	}
 	return size
 }

@@ -438,14 +438,16 @@ func TestChangesSizeWithHardlinks(t *testing.T) {
 	changes, err := ChangesDirs(destDir, &idtools.IDMappings{}, srcDir, &idtools.IDMappings{})
 	require.NoError(t, err)
 
-	got := ChangesSize(destDir, changes)
+	got, err := ChangesSizeWithError(destDir, changes)
+	require.NoError(t, err)
 	if got != int64(creationSize) {
 		t.Errorf("Expected %d bytes of changes, got %d", creationSize, got)
 	}
 }
 
 func TestChangesSizeWithNoChanges(t *testing.T) {
-	size := ChangesSize("/tmp", nil)
+	size, err := ChangesSizeWithError("/tmp", nil)
+	require.NoError(t, err)
 	if size != 0 {
 		t.Fatalf("ChangesSizes with no changes should be 0, was %d", size)
 	}
@@ -455,7 +457,8 @@ func TestChangesSizeWithOnlyDeleteChanges(t *testing.T) {
 	changes := []Change{
 		{Path: "deletedPath", Kind: ChangeDelete},
 	}
-	size := ChangesSize("/tmp", changes)
+	size, err := ChangesSizeWithError("/tmp", changes)
+	require.NoError(t, err)
 	if size != 0 {
 		t.Fatalf("ChangesSizes with only delete changes should be 0, was %d", size)
 	}
@@ -474,7 +477,8 @@ func TestChangesSize(t *testing.T) {
 		{Path: "addition", Kind: ChangeAdd},
 		{Path: "modification", Kind: ChangeModify},
 	}
-	size := ChangesSize(parentPath, changes)
+	size, err := ChangesSizeWithError(parentPath, changes)
+	require.NoError(t, err)
 	if size != 6 {
 		t.Fatalf("Expected 6 bytes of changes, got %d", size)
 	}
