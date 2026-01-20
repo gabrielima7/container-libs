@@ -39,3 +39,9 @@ func Lsetxattr(path string, attr string, data []byte, flags int) error {
 func Llistxattr(path string) ([]string, error) {
 	return nil, ErrNotSupportedPlatform
 }
+
+// RootLlistxattr lists extended attributes associated with
+// fsPath (per fs.ValidPath) under root.
+func RootLlistxattr(root *os.Root, fsPath string) ([]string, error) {
+	return nil, ErrNotSupportedPlatform
+}

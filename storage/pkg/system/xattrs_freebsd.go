@@ -101,13 +101,12 @@ func Lsetxattr(path string, attr string, value []byte, flags int) error {
 	return ExtattrSetLink(path, namespace, extattr, value)
 }
 
-// Llistxattr lists extended attributes associated with the given path
-// in the file system.
-func Llistxattr(path string) ([]string, error) {
+// listxattr is the logic underlying Llistxattr and RootLlistxattr.
+func listxattr(listOperation func(namespace int) ([]string, error)) ([]string, error) {
 	attrs := []string{}
 
 	for namespaceName, namespace := range namespaceMap {
-		namespaceAttrs, err := ExtattrListLink(path, namespace)
+		namespaceAttrs, err := listOperation(namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -118,4 +117,43 @@ func Llistxattr(path string) ([]string, error) {
 	}
 
 	return attrs, nil
+}
+
+// Llistxattr lists extended attributes associated with the given path
+// in the file system.
+func Llistxattr(path string) ([]string, error) {
+	return listxattr(func(namespace int) ([]string, error) {
+		return ExtattrListLink(path, namespace)
+	})
+}
+
+// RootLlistxattr lists extended attributes associated with
+// fsPath (per fs.ValidPath) under root.
+func RootLlistxattr(root *os.Root, fsPath string) ([]string, error) {
+	// O_PATH value on freebsd. We must define O_PATH ourselves
+	// until https://github.com/golang/go/issues/54355 is fixed.
+	const O_PATH = 0x00400000 //nolint:staticcheck // ST1003: should not use ALL_CAPS
+
+	// We can’t use root.Open(fsPath) because it follows trailing symlinks.
+	parentDir, err := root.Open(path.Dir(fsPath))
+	if err != nil {
+		return nil, err
+	}
+	defer parentDir.Close()
+	// A path per fs.ValidPath should not contain a ".."; reject it so that we can ensure no escape from parentDir.
+	fsBase := path.Base(fsPath)
+	if fsBase == ".." {
+		return nil, fmt.Errorf("trailing .. in RootLlistxattr(%q)", fsPath)
+	}
+	fd, err := syscallConnControl(parentDir, func(parentDir uintptr) (int, error) {
+		return unix.Openat(int(parentDir), filepath.FromSlash(fsBase), O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+
+	return listxattr(func(namespace int) ([]string, error) {
+		return extattrListFd(fd, namespace)
+	})
 }

@@ -89,24 +89,23 @@ func Lsetxattr(path string, attr string, data []byte, flags int) error {
 	return nil
 }
 
-// Llistxattr lists extended attributes associated with the given path
-// in the file system.
-func Llistxattr(path string) ([]string, error) {
+// listxattr is the logic underlying Llistxattr and RootLlistxattr.
+func listxattr(syscallName string, pathInError string, listSyscall func(dest []byte) (int, error)) ([]string, error) {
 	dest := make([]byte, 128)
-	sz, errno := unix.Llistxattr(path, dest)
+	sz, errno := listSyscall(dest)
 
 	for errno == unix.ERANGE {
 		// Buffer too small, use zero-sized buffer to get the actual size
-		sz, errno = unix.Llistxattr(path, []byte{})
+		sz, errno = listSyscall([]byte{})
 		if errno != nil {
-			return nil, &os.PathError{Op: "llistxattr", Path: path, Err: errno}
+			return nil, &os.PathError{Op: syscallName, Path: pathInError, Err: errno}
 		}
 
 		dest = make([]byte, sz)
-		sz, errno = unix.Llistxattr(path, dest)
+		sz, errno = listSyscall(dest)
 	}
 	if errno != nil {
-		return nil, &os.PathError{Op: "llistxattr", Path: path, Err: errno}
+		return nil, &os.PathError{Op: syscallName, Path: pathInError, Err: errno}
 	}
 
 	var attrs []string
@@ -117,4 +116,35 @@ func Llistxattr(path string) ([]string, error) {
 	}
 
 	return attrs, nil
+}
+
+// Llistxattr lists extended attributes associated with the given path
+// in the file system.
+func Llistxattr(path string) ([]string, error) {
+	return listxattr("llistxattr", path, func(dest []byte) (int, error) {
+		return unix.Llistxattr(path, dest)
+	})
+}
+
+// RootLlistxattr lists extended attributes associated with
+// fsPath (per fs.ValidPath) under root.
+func RootLlistxattr(root *os.Root, fsPath string) ([]string, error) {
+	// We can’t use root.Open(fsPath) because it follows trailing symlinks.
+	rootFD, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer rootFD.Close()
+	// macOS does not have O_PATH, so hope the user has enough permissions.
+	fd, err := syscallConnControl(rootFD, func(rootFD uintptr) (int, error) {
+		return unix.Openat(int(rootFD), filepath.FromSlash(fsPath), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_SYMLINK|O_RESOLVE_BENEATH, 0)
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+
+	return listxattr("RootLlistxattr", fsPath, func(dest []byte) (int, error) {
+		return unix.Flistxattr(fd, dest)
+	})
 }

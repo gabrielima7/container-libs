@@ -157,6 +157,26 @@ func TestRootXattrs(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, tc.want, got)
 	}
+
+	for _, tc := range []struct {
+		symlinkTest bool
+		fsPath      string
+		want        []string
+	}{
+		{false, "subdir/file", []string{xattrName}},
+		{true, "subdir/symlink", []string{xattrNameOnSymlink}},
+		{true, "subdir/symlink2", []string{xattrNameOnSymlink}},
+	} {
+		if tc.symlinkTest && !canTestSymlinks {
+			continue
+		}
+		got, err := RootLlistxattr(root, tc.fsPath)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, tc.want, testXattrListNames(got))
+	}
+
 	_, err = RootLgetxattr(root, "..", xattrName)
+	assert.Error(t, err)
+	_, err = RootLlistxattr(root, "..")
 	assert.Error(t, err)
 }
