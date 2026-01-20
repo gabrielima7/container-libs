@@ -9,7 +9,7 @@ import (
 
 // TestFromStatT tests fromStatT for a tempfile
 func TestFromStatT(t *testing.T) {
-	file, _, _ := prepareFiles(t)
+	_, file, _, _ := prepareFiles(t)
 
 	stat := &syscall.Stat_t{}
 	if err := syscall.Lstat(file, stat); err != nil {
