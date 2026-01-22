@@ -145,6 +145,8 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 			// We don't want this directory, but we need the files in them so that
 			// such hardlinks can be resolved.
 			if strings.HasPrefix(hdr.Name, WhiteoutLinkDir) && hdr.Typeflag == tar.TypeReg {
+				// FIXME: We have already created a dest/WhiteoutMetaPrefix “parent directory”.
+
 				// filepath.Base(hdr.Name) should be safe _if_ we set hdr.Name to filepath.Clean(hdr.Name),
 				// hdr.Clean() would interpret a trailing /. or /.. by modifying the whole path,
 				// leaving ".." only if there were no proper path components left — and the strings.HasPrefix
@@ -260,6 +262,7 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 				if srcHdr == nil {
 					return 0, fmt.Errorf("invalid aufs hardlink")
 				}
+				// FIXME: We _copy_ the contents of the hardlink, we don’t make a hardlink?!
 				tmpFile, err := os.Open(filepath.Join(aufsTempdir, linkBasename))
 				if err != nil {
 					return 0, err
