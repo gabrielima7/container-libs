@@ -721,7 +721,16 @@ func TestTarWithOptions(t *testing.T) {
 		opts    *TarOptions
 		changes []Change
 	}{
+		{&TarOptions{IncludeFiles: []string{"."}}, []Change{}},
+		{&TarOptions{IncludeFiles: []string{"./"}}, []Change{}},
+		{&TarOptions{IncludeFiles: []string{"/"}}, []Change{}},
+		{&TarOptions{IncludeFiles: []string{"/."}}, []Change{}},
 		{&TarOptions{IncludeFiles: []string{"1"}}, []Change{
+			{Path: "/2", Kind: ChangeDelete},
+			{Path: "/folder", Kind: ChangeDelete},
+			{Path: "/folder2", Kind: ChangeDelete},
+		}},
+		{&TarOptions{IncludeFiles: []string{"/1"}}, []Change{
 			{Path: "/2", Kind: ChangeDelete},
 			{Path: "/folder", Kind: ChangeDelete},
 			{Path: "/folder2", Kind: ChangeDelete},
