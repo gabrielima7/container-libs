@@ -185,7 +185,7 @@ func TestChangesWithChangesGH13590(t *testing.T) {
 	baseLayer := t.TempDir()
 
 	dir3 := path.Join(baseLayer, "dir1/dir2/dir3")
-	err := os.MkdirAll(dir3, 0o7400)
+	err := os.MkdirAll(dir3, 0o740)
 	require.NoError(t, err)
 
 	file := path.Join(dir3, "file.txt")
