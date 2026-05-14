@@ -977,7 +977,7 @@ func tarWithOptionsTo(dest io.Writer, srcPath string, options *TarOptions) (resu
 	for _, include := range includeFiles {
 		rebaseName := options.RebaseNames[include]
 
-		walkRoot := getWalkRoot(srcPath, include)
+		walkRoot := filepath.Join(srcPath, include)
 		if err := filepath.WalkDir(walkRoot, func(filePath string, d fs.DirEntry, err error) error {
 			if err != nil {
 				logrus.Errorf("Tar: Can't stat file %s to tar: %s", srcPath, err)
