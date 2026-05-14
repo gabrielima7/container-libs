@@ -38,7 +38,7 @@ func collectFileInfoForChanges(oldDir, newDir string, oldIDMap, newIDMap *idtool
 }
 
 func collectFileInfo(sourceDir string, idMappings *idtools.IDMappings) (*FileInfo, error) {
-	root := newRootFileInfo(idMappings)
+	rootFileInfo := newRootFileInfo(idMappings)
 
 	sourceStat, err := system.Lstat(sourceDir)
 	if err != nil {
@@ -63,7 +63,7 @@ func collectFileInfo(sourceDir string, idMappings *idtools.IDMappings) (*FileInf
 			return nil
 		}
 
-		parent := root.LookUp(filepath.Dir(relPath))
+		parent := rootFileInfo.LookUp(filepath.Dir(relPath))
 		if parent == nil {
 			return fmt.Errorf("collectFileInfo: Unexpectedly no parent for %s", relPath)
 		}
@@ -103,5 +103,5 @@ func collectFileInfo(sourceDir string, idMappings *idtools.IDMappings) (*FileInf
 	if err != nil {
 		return nil, err
 	}
-	return root, nil
+	return rootFileInfo, nil
 }

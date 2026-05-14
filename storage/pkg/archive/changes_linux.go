@@ -26,12 +26,10 @@ import (
 // directly. Eliminating stat calls in this way can save up to seconds on large
 // images.
 type walker struct {
-	dir1   string
-	dir2   string
-	root1  *FileInfo
-	root2  *FileInfo
-	idmap1 *idtools.IDMappings //nolint:unused
-	idmap2 *idtools.IDMappings //nolint:unused
+	dir1          string
+	dir2          string
+	rootFileInfo1 *FileInfo
+	rootFileInfo2 *FileInfo
 }
 
 // collectFileInfoForChanges returns a complete representation of the trees
@@ -42,10 +40,10 @@ type walker struct {
 // reflect the full contents.
 func collectFileInfoForChanges(dir1, dir2 string, idmap1, idmap2 *idtools.IDMappings) (*FileInfo, *FileInfo, error) {
 	w := &walker{
-		dir1:  dir1,
-		dir2:  dir2,
-		root1: newRootFileInfo(idmap1),
-		root2: newRootFileInfo(idmap2),
+		dir1:          dir1,
+		dir2:          dir2,
+		rootFileInfo1: newRootFileInfo(idmap1),
+		rootFileInfo2: newRootFileInfo(idmap2),
 	}
 
 	i1, err := os.Lstat(w.dir1)
@@ -61,16 +59,16 @@ func collectFileInfoForChanges(dir1, dir2 string, idmap1, idmap2 *idtools.IDMapp
 		return nil, nil, err
 	}
 
-	return w.root1, w.root2, nil
+	return w.rootFileInfo1, w.rootFileInfo2, nil
 }
 
 // Given a FileInfo, its path info, and a reference to the root of the tree
 // being constructed, register this file with the tree.
-func walkchunk(path string, fi os.FileInfo, dir string, root *FileInfo) error {
+func walkchunk(path string, fi os.FileInfo, dir string, rootFI *FileInfo) error {
 	if fi == nil {
 		return nil
 	}
-	parent := root.LookUp(filepath.Dir(path))
+	parent := rootFI.LookUp(filepath.Dir(path))
 	if parent == nil {
 		return fmt.Errorf("walkchunk: Unexpectedly no parent for %s", path)
 	}
@@ -78,7 +76,7 @@ func walkchunk(path string, fi os.FileInfo, dir string, root *FileInfo) error {
 		name:       filepath.Base(path),
 		children:   make(map[string]*FileInfo),
 		parent:     parent,
-		idMappings: root.idMappings,
+		idMappings: rootFI.idMappings,
 		target:     "",
 	}
 	cpath := filepath.Join(dir, path)
@@ -127,10 +125,10 @@ func (w *walker) walk(path string, i1, i2 os.FileInfo) (err error) {
 	// Register these nodes with the return trees, unless we're still at the
 	// (already-created) roots:
 	if path != "/" {
-		if err := walkchunk(path, i1, w.dir1, w.root1); err != nil {
+		if err := walkchunk(path, i1, w.dir1, w.rootFileInfo1); err != nil {
 			return err
 		}
-		if err := walkchunk(path, i2, w.dir2, w.root2); err != nil {
+		if err := walkchunk(path, i2, w.dir2, w.rootFileInfo2); err != nil {
 			return err
 		}
 	}
