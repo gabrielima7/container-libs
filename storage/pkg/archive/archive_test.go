@@ -1279,10 +1279,6 @@ func (b *errorBuf) Write(d []byte) (int, error) {
 	return b.Buffer.Write(d)
 }
 
-func (b *errorBuf) Close() error {
-	return nil
-}
-
 func TestTarErrorHandling(t *testing.T) {
 	dir := t.TempDir()
 

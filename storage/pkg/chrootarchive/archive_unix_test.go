@@ -144,10 +144,14 @@ func isDataInTar(t *testing.T, tr *gotar.Reader, compare []byte, maxBytes int64)
 	t.Helper()
 	for {
 		h, err := tr.Next()
-		if err == io.EOF {
+		if err != nil {
+			if err != io.EOF {
+				// If Tar notices the breakout attempt and fails, that’s _fine_; most importantly,
+				// we still want to ensure the data has not been leaked.
+				t.Logf("producer reported error: %v", err)
+			}
 			break
 		}
-		assert.NilError(t, err)
 
 		if h.Size == 0 {
 			continue

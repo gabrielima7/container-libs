@@ -898,15 +898,10 @@ func Tar(path string, compression Compression) (io.ReadCloser, error) {
 	return TarWithOptions(path, &TarOptions{Compression: compression})
 }
 
-func tarWithOptionsTo(dest io.WriteCloser, srcPath string, options *TarOptions) (result error) {
+func tarWithOptionsTo(dest io.Writer, srcPath string, options *TarOptions) (result error) {
 	// Fix the source path to work with long path names. This is a no-op
 	// on platforms other than Windows.
 	srcPath = fixVolumePathPrefix(srcPath)
-	defer func() {
-		if err := dest.Close(); err != nil && result == nil {
-			result = err
-		}
-	}()
 
 	pm, err := fileutils.NewPatternMatcher(options.ExcludePatterns)
 	if err != nil {
