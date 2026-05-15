@@ -34,7 +34,7 @@ const (
 	Symlink
 )
 
-type FileData struct {
+type sampleData struct {
 	filetype    FileType
 	path        string
 	contents    string
@@ -54,8 +54,35 @@ var sampleReadOnlyMode = func() os.FileMode {
 	return 0o404
 }()
 
+// populateDir populates (possibly non-empty) dest with contents, setting the timestamp for all files and dirs to timestamp.
+func populateDir(t *testing.T, dest string, timestamp time.Time, contents []sampleData) {
+	for _, info := range contents {
+		p := path.Join(dest, info.path)
+		switch info.filetype {
+		case Dir:
+			err := os.MkdirAll(p, info.permissions)
+			require.NoError(t, err)
+		case Regular:
+			err := os.WriteFile(p, []byte(info.contents), info.permissions)
+			require.NoError(t, err)
+		case Symlink:
+			err := os.Symlink(info.contents, p)
+			require.NoError(t, err)
+
+			err = resetSymlinkTimes(p)
+			require.NoError(t, err)
+		}
+
+		if info.filetype != Symlink {
+			// Set a consistent ctime, atime for all files and dirs
+			err := system.Chtimes(p, timestamp, timestamp)
+			require.NoError(t, err)
+		}
+	}
+}
+
 func createSampleDir(t *testing.T, root string) {
-	files := []FileData{
+	populateDir(t, root, time.Now(), []sampleData{
 		{Regular, "file1", "file1\n", 0o600},
 		{Regular, "file2", "file2\n", 0o666},
 		{Regular, "file3", "file3\n", sampleReadOnlyMode},
@@ -80,32 +107,7 @@ func createSampleDir(t *testing.T, root string) {
 		{Symlink, "symlink3", root + "/file1", 0o666},
 		{Symlink, "symlink4", root + "/symlink3", 0o666},
 		{Symlink, "dirSymlink", root + "/dir1", 0o740},
-	}
-
-	now := time.Now()
-	for _, info := range files {
-		p := path.Join(root, info.path)
-		switch info.filetype {
-		case Dir:
-			err := os.MkdirAll(p, info.permissions)
-			require.NoError(t, err)
-		case Regular:
-			err := os.WriteFile(p, []byte(info.contents), info.permissions)
-			require.NoError(t, err)
-		case Symlink:
-			err := os.Symlink(info.contents, p)
-			require.NoError(t, err)
-
-			err = resetSymlinkTimes(p)
-			require.NoError(t, err)
-		}
-
-		if info.filetype != Symlink {
-			// Set a consistent ctime, atime for all files and dirs
-			err := system.Chtimes(p, now, now)
-			require.NoError(t, err)
-		}
-	}
+	})
 }
 
 func TestChangeString(t *testing.T) {
