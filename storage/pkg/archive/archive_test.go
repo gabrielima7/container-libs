@@ -618,7 +618,7 @@ func tarUntar(t *testing.T, origin string, options *TarOptions) ([]Change, error
 		return nil, err
 	}
 
-	return ChangesDirs(origin, &idtools.IDMappings{}, tmp, &idtools.IDMappings{})
+	return ChangesDirs(tmp, &idtools.IDMappings{}, origin, &idtools.IDMappings{})
 }
 
 func TestTarUntar(t *testing.T) {
@@ -706,35 +706,58 @@ func TestTarWithOptions(t *testing.T) {
 		t.Skip("Failing on Windows")
 	}
 	origin := t.TempDir()
-	if _, err := os.MkdirTemp(origin, "folder"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(origin, "1"), []byte("hello world"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(origin, "2"), []byte("welcome!"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	populateDir(t, origin, time.Now(), []sampleData{
+		{Dir, "folder", "", 0o755},
+		{Regular, "1", "hello world", 0o700},
+		{Regular, "2", "welcome!", 0o700},
+		{Dir, "folder2", "", 0o700},
+		{Regular, "folder2/1", "in folder2", 0o700},
+		{Dir, "folder2/subfolder", "", 0o700},
+		{Regular, "folder2/subfolder/sub", "in subfolder", 0o700},
+		{Dir, "folder2/subfolder2", "", 0o700},
+	})
 
 	cases := []struct {
-		opts       *TarOptions
-		numChanges int
+		opts    *TarOptions
+		changes []Change
 	}{
-		{&TarOptions{IncludeFiles: []string{"1"}}, 2},
-		{&TarOptions{ExcludePatterns: []string{"2"}}, 1},
-		{&TarOptions{ExcludePatterns: []string{"1", "folder*"}}, 2},
-		{&TarOptions{IncludeFiles: []string{"1", "1"}}, 2},
-		{&TarOptions{IncludeFiles: []string{"1"}, RebaseNames: map[string]string{"1": "test"}}, 4},
+		{&TarOptions{IncludeFiles: []string{"1"}}, []Change{
+			{Path: "/2", Kind: ChangeDelete},
+			{Path: "/folder", Kind: ChangeDelete},
+			{Path: "/folder2", Kind: ChangeDelete},
+		}},
+		{&TarOptions{ExcludePatterns: []string{"2"}}, []Change{
+			{Path: "/2", Kind: ChangeDelete},
+		}},
+		{&TarOptions{ExcludePatterns: []string{"1", "folder*"}}, []Change{
+			{Path: "/1", Kind: ChangeDelete},
+			{Path: "/folder", Kind: ChangeDelete},
+			{Path: "/folder2", Kind: ChangeDelete},
+		}},
+		{&TarOptions{IncludeFiles: []string{"1", "1"}}, []Change{
+			{Path: "/2", Kind: ChangeDelete},
+			{Path: "/folder", Kind: ChangeDelete},
+			{Path: "/folder2", Kind: ChangeDelete},
+		}},
+		{&TarOptions{IncludeFiles: []string{"1"}, RebaseNames: map[string]string{"1": "test"}}, []Change{
+			{Path: "/1", Kind: ChangeDelete},
+			{Path: "/2", Kind: ChangeDelete},
+			{Path: "/folder", Kind: ChangeDelete},
+			{Path: "/test", Kind: ChangeAdd},
+			{Path: "/folder2", Kind: ChangeDelete},
+		}},
+		{&TarOptions{ExcludePatterns: []string{"folder2", "!folder2/subfolder"}}, []Change{
+			{Path: "/folder2", Kind: ChangeModify}, // folder2 is excluded, but Untar must create the parent — so it creates it using default values
+			{Path: "/folder2/1", Kind: ChangeDelete},
+			{Path: "/folder2/subfolder2", Kind: ChangeDelete},
+		}},
 	}
 	for _, testCase := range cases {
 		changes, err := tarUntar(t, origin, testCase.opts)
 		if err != nil {
 			t.Fatalf("Error tar/untar when testing inclusion/exclusion: %s", err)
 		}
-		if len(changes) != testCase.numChanges {
-			t.Errorf("Expected %d changes, got %d for %+v:",
-				testCase.numChanges, len(changes), testCase.opts)
-		}
+		assert.ElementsMatch(t, testCase.changes, changes)
 	}
 }
 

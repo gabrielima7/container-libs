@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.podman.io/storage/pkg/idtools"
 	"go.podman.io/storage/pkg/system"
@@ -71,6 +72,9 @@ func populateDir(t *testing.T, dest string, timestamp time.Time, contents []samp
 
 			err = resetSymlinkTimes(p)
 			require.NoError(t, err)
+
+		default:
+			t.Fatalf("unknown filetype: %d", info.filetype)
 		}
 
 		if info.filetype != Symlink {
@@ -107,6 +111,7 @@ func createSampleDir(t *testing.T, root string) {
 		{Symlink, "symlink3", root + "/file1", 0o666},
 		{Symlink, "symlink4", root + "/symlink3", 0o666},
 		{Symlink, "dirSymlink", root + "/dir1", 0o740},
+		{Symlink, "escapingSymlink", root + "/../../../../../../../etc/shadow", 0o666},
 	})
 }
 
@@ -248,6 +253,37 @@ func TestChangesWithChangesGH13590(t *testing.T) {
 		{"/dir1/dir2/dir3/file.txt", ChangeModify},
 	}
 	checkChanges(t, expectedChanges, changes)
+}
+
+func TestChangesParentWhiteouts(t *testing.T) {
+	layer1 := t.TempDir()
+	populateDir(t, layer1, time.Now(), []sampleData{
+		{Regular, "file1", "file1\n", 0o600},
+		{Dir, "dir2", "", 0o700},
+		{Regular, "dir2/file2", "file2\n", 0o600},
+	})
+
+	layer2 := t.TempDir()
+	populateDir(t, layer2, time.Now(), []sampleData{
+		{Regular, ".wh.file1", "", 0o600},
+		{Regular, ".wh.dir2", "", 0o600},
+	})
+
+	layer3 := t.TempDir()
+	populateDir(t, layer3, time.Now(), []sampleData{
+		{Regular, "file1", "file1-new\n", 0o600},
+		{Dir, "dir2", "", 0o700},
+		{Regular, "dir2/file2", "file2-new\n", 0o600},
+	})
+
+	changes, err := Changes([]string{layer2, layer1}, layer3)
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []Change{
+		{"/file1", ChangeAdd},
+		{"/dir2", ChangeAdd},
+		{"/dir2/file2", ChangeAdd},
+	}, changes)
 }
 
 // Create a directory, copy it, make sure we report no changes between the two
