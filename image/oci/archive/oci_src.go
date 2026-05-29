@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 
 	digest "github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -13,8 +15,10 @@ import (
 	"go.podman.io/image/v5/internal/imagesource/impl"
 	"go.podman.io/image/v5/internal/private"
 	"go.podman.io/image/v5/internal/signature"
+	"go.podman.io/image/v5/internal/tmpdir"
 	ocilayout "go.podman.io/image/v5/oci/layout"
 	"go.podman.io/image/v5/types"
+	"go.podman.io/storage/pkg/archive"
 )
 
 // ImageNotFoundError is used when the OCI structure, in principle, exists and seems valid enough,
@@ -173,4 +177,60 @@ func (s *ociArchiveImageSource) GetSignaturesWithFormat(ctx context.Context, ins
 // WARNING: The list may contain duplicates, and they are semantically relevant.
 func (s *ociArchiveImageSource) LayerInfosForCopy(ctx context.Context, instanceDigest *digest.Digest) ([]types.BlobInfo, error) {
 	return s.unpackedSrc.LayerInfosForCopy(ctx, instanceDigest)
+}
+
+// struct to store the ociReference and temporary directory returned by createOCIRef
+type tempDirOCIRef struct {
+	tempDirectory   string
+	ociRefExtracted types.ImageReference
+}
+
+// deletes the temporary directory created
+func (t *tempDirOCIRef) deleteTempDir() error {
+	return os.RemoveAll(t.tempDirectory)
+}
+
+// createOCIRef creates the oci reference of the image
+// If SystemContext.BigFilesTemporaryDir not "", overrides the temporary directory to use for storing big files
+func createOCIRef(sys *types.SystemContext, image string) (tempDirOCIRef, error) {
+	dir, err := tmpdir.MkDirBigFileTemp(sys, "oci")
+	if err != nil {
+		return tempDirOCIRef{}, fmt.Errorf("creating temp directory: %w", err)
+	}
+	ociRef, err := ocilayout.NewReference(dir, image)
+	if err != nil {
+		return tempDirOCIRef{}, err
+	}
+
+	tempDirRef := tempDirOCIRef{tempDirectory: dir, ociRefExtracted: ociRef}
+	return tempDirRef, nil
+}
+
+// creates the temporary directory and copies the tarred content to it
+func createUntarTempDir(sys *types.SystemContext, ref ociArchiveReference) (tempDirOCIRef, error) {
+	src := ref.resolvedFile
+	arch, err := os.Open(src)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return tempDirOCIRef{}, ArchiveFileNotFoundError{ref: ref, path: src}
+		} else {
+			return tempDirOCIRef{}, err
+		}
+	}
+	defer arch.Close()
+
+	tempDirRef, err := createOCIRef(sys, ref.image)
+	if err != nil {
+		return tempDirOCIRef{}, fmt.Errorf("creating oci reference: %w", err)
+	}
+	dst := tempDirRef.tempDirectory
+
+	// TODO: This can take quite some time, and should ideally be cancellable using a context.Context.
+	if err := archive.NewDefaultArchiver().Untar(arch, dst, &archive.TarOptions{NoLchown: true}); err != nil {
+		if err := tempDirRef.deleteTempDir(); err != nil {
+			return tempDirOCIRef{}, fmt.Errorf("deleting temp directory %q: %w", tempDirRef.tempDirectory, err)
+		}
+		return tempDirOCIRef{}, fmt.Errorf("untarring file %q: %w", tempDirRef.tempDirectory, err)
+	}
+	return tempDirRef, nil
 }
