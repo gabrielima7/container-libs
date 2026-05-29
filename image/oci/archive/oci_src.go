@@ -190,23 +190,7 @@ func (t *tempDirOCIRef) deleteTempDir() error {
 	return os.RemoveAll(t.tempDirectory)
 }
 
-// createOCIRef creates the oci reference of the image
-// If SystemContext.BigFilesTemporaryDir not "", overrides the temporary directory to use for storing big files
-func createOCIRef(sys *types.SystemContext, image string) (tempDirOCIRef, error) {
-	dir, err := tmpdir.MkDirBigFileTemp(sys, "oci")
-	if err != nil {
-		return tempDirOCIRef{}, fmt.Errorf("creating temp directory: %w", err)
-	}
-	ociRef, err := ocilayout.NewReference(dir, image)
-	if err != nil {
-		return tempDirOCIRef{}, err
-	}
-
-	tempDirRef := tempDirOCIRef{tempDirectory: dir, ociRefExtracted: ociRef}
-	return tempDirRef, nil
-}
-
-// creates the temporary directory and copies the tarred content to it
+// createUntarTempDir sets up a temporary directory with extracted contents of the archive containing ref.
 func createUntarTempDir(sys *types.SystemContext, ref ociArchiveReference) (tempDirOCIRef, error) {
 	src := ref.resolvedFile
 	arch, err := os.Open(src)
@@ -219,18 +203,30 @@ func createUntarTempDir(sys *types.SystemContext, ref ociArchiveReference) (temp
 	}
 	defer arch.Close()
 
-	tempDirRef, err := createOCIRef(sys, ref.image)
+	tempDir, err := tmpdir.MkDirBigFileTemp(sys, "oci")
+	if err != nil {
+		return tempDirOCIRef{}, fmt.Errorf("creating temp directory: %w", err)
+	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			os.RemoveAll(tempDir)
+		}
+	}()
+
+	ociRef, err := ocilayout.NewReference(tempDir, ref.image)
 	if err != nil {
 		return tempDirOCIRef{}, fmt.Errorf("creating oci reference: %w", err)
 	}
-	dst := tempDirRef.tempDirectory
 
 	// TODO: This can take quite some time, and should ideally be cancellable using a context.Context.
-	if err := archive.NewDefaultArchiver().Untar(arch, dst, &archive.TarOptions{NoLchown: true}); err != nil {
-		if err := tempDirRef.deleteTempDir(); err != nil {
-			return tempDirOCIRef{}, fmt.Errorf("deleting temp directory %q: %w", tempDirRef.tempDirectory, err)
-		}
-		return tempDirOCIRef{}, fmt.Errorf("untarring file %q: %w", tempDirRef.tempDirectory, err)
+	if err := archive.NewDefaultArchiver().Untar(arch, tempDir, &archive.TarOptions{NoLchown: true}); err != nil {
+		return tempDirOCIRef{}, fmt.Errorf("untarring file %q: %w", tempDir, err)
 	}
-	return tempDirRef, nil
+
+	succeeded = true
+	return tempDirOCIRef{
+		tempDirectory:   tempDir,
+		ociRefExtracted: ociRef,
+	}, nil
 }
