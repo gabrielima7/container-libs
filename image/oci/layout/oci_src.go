@@ -85,7 +85,11 @@ func newImageSource(sys *types.SystemContext, ref ociReference) (private.ImageSo
 		ref:    ref,
 		client: client,
 	}
-	s.fs = os.DirFS(ref.dir)
+	if ref.reader != nil {
+		s.fs = ref.reader.root.FS()
+	} else {
+		s.fs = os.DirFS(ref.dir)
+	}
 	if sys != nil && sys.OCISharedBlobDirPath != "" {
 		// TODO(jonboulle): check dir existence?
 		s.blobFS = os.DirFS(sys.OCISharedBlobDirPath)
@@ -93,7 +97,9 @@ func newImageSource(sys *types.SystemContext, ref ociReference) (private.ImageSo
 		s.blobFSLocalPath = sys.OCISharedBlobDirPath
 	} else {
 		s.blobFS = s.fs
-		s.blobFSLocalPath = s.ref.dir
+		if ref.reader == nil {
+			s.blobFSLocalPath = s.ref.dir
+		}
 	}
 	index, err := srcGetIndex(s.fs)
 	if err != nil {
@@ -287,7 +293,12 @@ func LoadManifestDescriptor(imgRef types.ImageReference) (imgspecv1.Descriptor, 
 		return imgspecv1.Descriptor{}, errors.New("error typecasting, need type ociRef")
 	}
 
-	ociFS := os.DirFS(ociRef.dir)
+	var ociFS fs.FS
+	if ociRef.reader != nil {
+		ociFS = ociRef.reader.root.FS()
+	} else {
+		ociFS = os.DirFS(ociRef.dir)
+	}
 
 	index, err := srcGetIndex(ociFS)
 	if err != nil {

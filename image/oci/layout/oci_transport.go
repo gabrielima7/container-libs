@@ -66,6 +66,8 @@ type ociReference struct {
 	// If not -1, a zero-based index of an image in the manifest index. Valid only for sources.
 	// Must not be set if image is set.
 	sourceIndex int
+
+	reader *Reader // If not nil, must be rooted at dir.
 }
 
 // ParseReference converts a string, which should not start with the ImageTransport.Name prefix, into an OCI ImageReference.
@@ -74,7 +76,7 @@ func ParseReference(reference string) (types.ImageReference, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newReference(dir, image, index)
+	return newReference(dir, image, index, nil)
 }
 
 // newReference returns an OCI reference for a directory, and an image name annotation or sourceIndex.
@@ -82,7 +84,7 @@ func ParseReference(reference string) (types.ImageReference, error) {
 // If sourceIndex==-1, the index will not be valid to point out the source image, only image will be used.
 // We do not expose an API supplying the resolvedDir; we could, but recomputing it
 // is generally cheap enough that we prefer being confident about the properties of resolvedDir.
-func newReference(dir, image string, sourceIndex int) (types.ImageReference, error) {
+func newReference(dir, image string, sourceIndex int, reader *Reader) (types.ImageReference, error) {
 	resolved, err := explicitfilepath.ResolvePathToFullyExplicit(dir)
 	if err != nil {
 		return nil, err
@@ -102,7 +104,16 @@ func newReference(dir, image string, sourceIndex int) (types.ImageReference, err
 	if sourceIndex != -1 && image != "" {
 		return nil, fmt.Errorf("Invalid oci: layout reference: cannot use both an image %s and a source index @%d", image, sourceIndex)
 	}
-	return ociReference{dir: dir, resolvedDir: resolved, image: image, sourceIndex: sourceIndex}, nil
+	if reader != nil && reader.root.Name() != dir {
+		return nil, fmt.Errorf("OCI layout directory %q does not match Reader’s root %q", dir, reader.root.Name())
+	}
+	return ociReference{
+		dir:         dir,
+		resolvedDir: resolved,
+		image:       image,
+		sourceIndex: sourceIndex,
+		reader:      reader,
+	}, nil
 }
 
 // NewIndexReference returns an OCI reference for a path and a zero-based source manifest index.
@@ -110,12 +121,12 @@ func NewIndexReference(dir string, sourceIndex int) (types.ImageReference, error
 	if sourceIndex < 0 {
 		return nil, fmt.Errorf("invalid call to NewIndexReference with negative index %d", sourceIndex)
 	}
-	return newReference(dir, "", sourceIndex)
+	return newReference(dir, "", sourceIndex, nil)
 }
 
 // NewReference returns an OCI reference for a directory and an optional image name annotation (if not "").
 func NewReference(dir, image string) (types.ImageReference, error) {
-	return newReference(dir, image, -1)
+	return newReference(dir, image, -1, nil)
 }
 
 func (ref ociReference) Transport() types.ImageTransport {

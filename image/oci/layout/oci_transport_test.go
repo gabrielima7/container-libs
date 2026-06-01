@@ -202,22 +202,40 @@ func TestNewReference(t *testing.T) {
 	)
 
 	tmpDir := t.TempDir()
-
-	ref, err := NewReference(tmpDir, imageValue)
+	root, err := os.OpenRoot(tmpDir)
 	require.NoError(t, err)
-	ociRef, ok := ref.(ociReference)
-	require.True(t, ok)
-	assert.Equal(t, tmpDir, ociRef.dir)
-	assert.Equal(t, imageValue, ociRef.image)
-	assert.Equal(t, -1, ociRef.sourceIndex)
+	defer root.Close()
+	reader := NewReaderWithRoot(root)
+	// NewReference and reader.NewReference should result in ~the same behavior
+	newReferences := []struct {
+		fn             func(dir string, image string) (types.ImageReference, error)
+		expectedReader *Reader
+	}{
+		{NewReference, nil},
+		{reader.NewReference, reader},
+	}
 
-	ref, err = NewReference(tmpDir, noImageValue)
-	require.NoError(t, err)
-	ociRef, ok = ref.(ociReference)
-	require.True(t, ok)
-	assert.Equal(t, tmpDir, ociRef.dir)
-	assert.Equal(t, noImageValue, ociRef.image)
-	assert.Equal(t, -1, ociRef.sourceIndex)
+	for _, nr := range newReferences {
+		ref, err := nr.fn(tmpDir, imageValue)
+		require.NoError(t, err)
+		ociRef, ok := ref.(ociReference)
+		require.True(t, ok)
+		assert.Equal(t, tmpDir, ociRef.dir)
+		assert.Equal(t, imageValue, ociRef.image)
+		assert.Equal(t, -1, ociRef.sourceIndex)
+		assert.Equal(t, nr.expectedReader, ociRef.reader)
+	}
+
+	for _, nr := range newReferences {
+		ref, err := nr.fn(tmpDir, noImageValue)
+		require.NoError(t, err)
+		ociRef, ok := ref.(ociReference)
+		require.True(t, ok)
+		assert.Equal(t, tmpDir, ociRef.dir)
+		assert.Equal(t, noImageValue, ociRef.image)
+		assert.Equal(t, -1, ociRef.sourceIndex)
+		assert.Equal(t, nr.expectedReader, ociRef.reader)
+	}
 
 	_, err = NewReference(tmpDir+"/thisparentdoesnotexist/something", imageValue)
 	assert.Error(t, err)
@@ -229,7 +247,11 @@ func TestNewReference(t *testing.T) {
 	assert.Error(t, err)
 
 	// Test private newReference
-	_, err = newReference(tmpDir, imageValue, 1)
+	_, err = newReference(tmpDir, imageValue, 1, nil)
+	assert.Error(t, err)
+
+	nonMatchingDir := t.TempDir() // does not match root
+	_, err = reader.NewReference(nonMatchingDir, "")
 	assert.Error(t, err)
 }
 
@@ -268,9 +290,9 @@ func TestNewIndexReference(t *testing.T) {
 	}
 
 	// Test private newReference
-	_, err = newReference(tmpDir, imageValue, 1)
+	_, err = newReference(tmpDir, imageValue, 1, nil)
 	assert.Error(t, err)
-	_, err = newReference(tmpDir, "", -3)
+	_, err = newReference(tmpDir, "", -3, nil)
 	assert.Error(t, err)
 }
 
