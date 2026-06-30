@@ -35,7 +35,7 @@ func TestPutBlobDigestFailure(t *testing.T) {
 	ref, _ := refToTempOCI(t, false)
 	dirRef, ok := ref.(ociReference)
 	require.True(t, ok)
-	blobPath, err := dirRef.blobPath(blobDigest, "")
+	blobPath, err := destBlobPath(dirRef, blobDigest, "")
 	assert.NoError(t, err)
 	cache := memory.New()
 
@@ -201,7 +201,7 @@ func TestPutblobFromLocalFile(t *testing.T) {
 		require.Equal(t, test.size, size)
 		require.Equal(t, test.digest, digest.String())
 
-		blobPath, err := ociDest.ref.blobPath(digest, ociDest.sharedBlobDir)
+		blobPath, err := destBlobPath(ociDest.ref, digest, ociDest.sharedBlobDir)
 		require.NoError(t, err)
 		require.FileExists(t, blobPath)
 
@@ -215,4 +215,50 @@ func TestPutblobFromLocalFile(t *testing.T) {
 
 	err = ociDest.CommitWithOptions(context.Background(), private.CommitOptions{})
 	require.NoError(t, err)
+}
+
+func TestDestOciLayoutPath(t *testing.T) {
+	ref, tmpDir := refToTempOCI(t, false)
+	ociRef, ok := ref.(ociReference)
+	require.True(t, ok)
+	assert.Equal(t, tmpDir+"/oci-layout", destOciLayoutPath(ociRef))
+}
+
+func TestDestIndexPath(t *testing.T) {
+	ref, tmpDir := refToTempOCI(t, false)
+	ociRef, ok := ref.(ociReference)
+	require.True(t, ok)
+	assert.Equal(t, tmpDir+"/index.json", destIndexPath(ociRef))
+}
+
+func TestDestBlobPath(t *testing.T) {
+	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	ref, tmpDir := refToTempOCI(t, false)
+	ociRef, ok := ref.(ociReference)
+	require.True(t, ok)
+	bp, err := destBlobPath(ociRef, "sha256:"+hex, "")
+	assert.NoError(t, err)
+	assert.Equal(t, tmpDir+"/blobs/sha256/"+hex, bp)
+}
+
+func TestDestSharedBlobPathShared(t *testing.T) {
+	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	ref, _ := refToTempOCI(t, false)
+	ociRef, ok := ref.(ociReference)
+	require.True(t, ok)
+	bp, err := destBlobPath(ociRef, "sha256:"+hex, "/external/path")
+	assert.NoError(t, err)
+	assert.Equal(t, "/external/path/sha256/"+hex, bp)
+}
+
+func TestDestBlobPathInvalid(t *testing.T) {
+	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	ref, _ := refToTempOCI(t, false)
+	ociRef, ok := ref.(ociReference)
+	require.True(t, ok)
+	_, err := destBlobPath(ociRef, hex, "")
+	assert.ErrorContains(t, err, "unexpected digest reference "+hex)
 }

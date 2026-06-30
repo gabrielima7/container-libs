@@ -237,11 +237,6 @@ func (ref ociReference) NewImageDestination(ctx context.Context, sys *types.Syst
 	return newImageDestination(sys, ref)
 }
 
-// ociLayoutPath returns a path for the oci-layout within a directory using OCI conventions.
-func (ref ociReference) ociLayoutPath() string {
-	return filepath.Join(ref.dir, imgspecv1.ImageLayoutFile)
-}
-
 // indexPath returns a path for the index.json within a directory using OCI conventions.
 func (ref ociReference) indexPath() string {
 	return filepath.Join(ref.dir, imgspecv1.ImageIndexFile)
@@ -249,6 +244,7 @@ func (ref ociReference) indexPath() string {
 
 // blobPath returns a path for a blob within a directory using OCI image-layout conventions.
 func (ref ociReference) blobPath(digest digest.Digest, sharedBlobDir string) (string, error) {
+	// Keep this consistent with destBlobPath()!
 	if err := digest.Validate(); err != nil {
 		return "", fmt.Errorf("unexpected digest reference %s: %w", digest, err)
 	}

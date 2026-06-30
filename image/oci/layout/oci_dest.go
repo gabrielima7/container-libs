@@ -169,7 +169,7 @@ func (d *ociImageDestination) blobFileSyncAndRename(blobFile *os.File, blobDiges
 		}
 	}
 
-	blobPath, err := d.ref.blobPath(blobDigest, d.sharedBlobDir)
+	blobPath, err := destBlobPath(d.ref, blobDigest, d.sharedBlobDir)
 	if err != nil {
 		return err
 	}
@@ -203,7 +203,7 @@ func (d *ociImageDestination) TryReusingBlobWithOptions(ctx context.Context, inf
 	if info.Digest == "" {
 		return false, private.ReusedBlob{}, errors.New("Can not check for a blob with unknown digest")
 	}
-	blobPath, err := d.ref.blobPath(info.Digest, d.sharedBlobDir)
+	blobPath, err := destBlobPath(d.ref, info.Digest, d.sharedBlobDir)
 	if err != nil {
 		return false, private.ReusedBlob{}, err
 	}
@@ -240,7 +240,7 @@ func (d *ociImageDestination) PutManifest(ctx context.Context, m []byte, instanc
 		}
 	}
 
-	blobPath, err := d.ref.blobPath(digest, d.sharedBlobDir)
+	blobPath, err := destBlobPath(d.ref, digest, d.sharedBlobDir)
 	if err != nil {
 		return err
 	}
@@ -311,14 +311,14 @@ func (d *ociImageDestination) CommitWithOptions(ctx context.Context, options pri
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(d.ref.ociLayoutPath(), layoutBytes, 0644); err != nil {
+	if err := os.WriteFile(destOciLayoutPath(d.ref), layoutBytes, 0644); err != nil {
 		return err
 	}
 	indexJSON, err := json.Marshal(d.index)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.ref.indexPath(), indexJSON, 0644)
+	return os.WriteFile(destIndexPath(d.ref), indexJSON, 0644)
 }
 
 // PutBlobFromLocalFileOption is unused but may receive functionality in the future.
@@ -402,7 +402,7 @@ func ensureParentDirectoryExists(path string) error {
 // indexExists checks whether the index location specified in the OCI reference exists.
 // The implementation is opinionated, since in case of unexpected errors false is returned
 func indexExists(ref ociReference) bool {
-	err := fileutils.Exists(ref.indexPath())
+	err := fileutils.Exists(destIndexPath(ref))
 	if err == nil {
 		return true
 	}
@@ -414,7 +414,7 @@ func indexExists(ref ociReference) bool {
 
 // destGetIndex reads an index within the OCI layout used in ref.
 func destGetIndex(ref ociReference) (*imgspecv1.Index, error) {
-	return destParseJSON[imgspecv1.Index](ref.indexPath())
+	return destParseJSON[imgspecv1.Index](destIndexPath(ref))
 }
 
 func destParseJSON[T any](path string) (*T, error) {
@@ -429,4 +429,29 @@ func destParseJSON[T any](path string) (*T, error) {
 		return nil, err
 	}
 	return obj, nil
+}
+
+// destOciLayoutPath returns a path for the oci-layout within a directory using OCI conventions.
+func destOciLayoutPath(ref ociReference) string {
+	return filepath.Join(ref.dir, imgspecv1.ImageLayoutFile)
+}
+
+// destIndexPath returns a path for the index.json within a directory using OCI conventions.
+func destIndexPath(ref ociReference) string {
+	return filepath.Join(ref.dir, imgspecv1.ImageIndexFile)
+}
+
+// destBlobPath returns a path for a blob within a directory using OCI image-layout conventions.
+func destBlobPath(ref ociReference, digest digest.Digest, sharedBlobDir string) (string, error) {
+	// Keep this consistent with ociReference.blobPath()!
+	if err := digest.Validate(); err != nil {
+		return "", fmt.Errorf("unexpected digest reference %s: %w", digest, err)
+	}
+	var blobDir string
+	if sharedBlobDir != "" {
+		blobDir = sharedBlobDir
+	} else {
+		blobDir = filepath.Join(ref.dir, imgspecv1.ImageBlobsDir)
+	}
+	return filepath.Join(blobDir, digest.Algorithm().String(), digest.Encoded()), nil
 }

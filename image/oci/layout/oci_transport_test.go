@@ -449,13 +449,6 @@ func TestReferenceNewImageDestination(t *testing.T) {
 	defer dest.Close()
 }
 
-func TestReferenceOCILayoutPath(t *testing.T) {
-	ref, tmpDir := refToTempOCI(t, false)
-	ociRef, ok := ref.(ociReference)
-	require.True(t, ok)
-	assert.Equal(t, tmpDir+"/oci-layout", ociRef.ociLayoutPath())
-}
-
 func TestReferenceIndexPath(t *testing.T) {
 	ref, tmpDir := refToTempOCI(t, false)
 	ociRef, ok := ref.(ociReference)
