@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	digest "github.com/opencontainers/go-digest"
+	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.podman.io/image/v5/internal/private"
@@ -175,4 +176,26 @@ func TestGetLocalBlobPath(t *testing.T) {
 		_, err = GetLocalBlobPath(context.Background(), src, dig)
 		require.Error(t, err)
 	}
+}
+
+func TestLoadManifestDescriptor(t *testing.T) {
+	ref, err := NewIndexReference("fixtures/two_images_manifest", 0)
+	assert.NoError(t, err)
+	res, err := LoadManifestDescriptor(ref)
+	assert.NoError(t, err)
+	assert.Equal(t, imgspecv1.Descriptor{
+		MediaType: "application/vnd.oci.image.manifest.v1+json",
+		Digest:    "sha256:e692418e4cbaf90ca69d05a66403747baa33ee08806650b51fab815ad7fc331f",
+		Size:      7143,
+		Platform: &imgspecv1.Platform{
+			Architecture: "ppc64le",
+			OS:           "linux",
+		}}, res)
+
+	// Out of bounds
+	ref, err = NewIndexReference("fixtures/two_images_manifest", 6)
+	assert.NoError(t, err)
+	_, err = LoadManifestDescriptor(ref)
+	assert.Error(t, err)
+	assert.Equal(t, "index 6 is too large, only 2 entries available", err.Error())
 }

@@ -246,3 +246,18 @@ func GetLocalBlobPath(ctx context.Context, src types.ImageSource, digest digest.
 
 	return path, nil
 }
+
+// LoadManifestDescriptor loads the manifest descriptor to be used to retrieve the image name
+// when pulling an image
+func LoadManifestDescriptor(imgRef types.ImageReference) (imgspecv1.Descriptor, error) {
+	ociRef, ok := imgRef.(ociReference)
+	if !ok {
+		return imgspecv1.Descriptor{}, errors.New("error typecasting, need type ociRef")
+	}
+	index, err := ociRef.getIndex()
+	if err != nil {
+		return imgspecv1.Descriptor{}, err
+	}
+	md, _, err := ociRef.getManifestDescriptor(index)
+	return md, err
+}

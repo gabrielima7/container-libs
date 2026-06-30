@@ -251,21 +251,6 @@ func (ref ociReference) getManifestDescriptor(index *imgspecv1.Index) (imgspecv1
 	}
 }
 
-// LoadManifestDescriptor loads the manifest descriptor to be used to retrieve the image name
-// when pulling an image
-func LoadManifestDescriptor(imgRef types.ImageReference) (imgspecv1.Descriptor, error) {
-	ociRef, ok := imgRef.(ociReference)
-	if !ok {
-		return imgspecv1.Descriptor{}, errors.New("error typecasting, need type ociRef")
-	}
-	index, err := ociRef.getIndex()
-	if err != nil {
-		return imgspecv1.Descriptor{}, err
-	}
-	md, _, err := ociRef.getManifestDescriptor(index)
-	return md, err
-}
-
 // NewImageSource returns a types.ImageSource for this reference.
 // The caller must call .Close() on the returned ImageSource.
 func (ref ociReference) NewImageSource(ctx context.Context, sys *types.SystemContext) (types.ImageSource, error) {
