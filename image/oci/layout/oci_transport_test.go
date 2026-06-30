@@ -14,8 +14,6 @@ import (
 )
 
 func TestGetManifestDescriptor(t *testing.T) {
-	emptyDir := t.TempDir()
-
 	for _, c := range []struct {
 		dir, image         string
 		expectedDescriptor *imgspecv1.Descriptor // nil if a failure ie expected. errorIs / errorAs allows more specific checks.
@@ -23,11 +21,6 @@ func TestGetManifestDescriptor(t *testing.T) {
 		errorIs            error
 		errorAs            any
 	}{
-		{ // Index is missing
-			dir:                emptyDir,
-			image:              "",
-			expectedDescriptor: nil,
-		},
 		{ // A valid reference to the only manifest
 			dir:   "fixtures/manifest",
 			image: "",
@@ -108,7 +101,9 @@ func TestGetManifestDescriptor(t *testing.T) {
 		ref, err := NewReference(c.dir, c.image)
 		require.NoError(t, err)
 
-		res, i, err := ref.(ociReference).getManifestDescriptor()
+		index, err := ref.(ociReference).getIndex()
+		require.NoError(t, err)
+		res, i, err := ref.(ociReference).getManifestDescriptor(index)
 		if c.expectedDescriptor != nil {
 			require.NoError(t, err)
 			assert.Equal(t, c.expectedIndex, i)

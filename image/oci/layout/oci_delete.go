@@ -22,7 +22,11 @@ func (ref ociReference) DeleteImage(ctx context.Context, sys *types.SystemContex
 		sharedBlobsDir = sys.OCISharedBlobDirPath
 	}
 
-	descriptor, descriptorIndex, err := ref.getManifestDescriptor()
+	index, err := ref.getIndex()
+	if err != nil {
+		return err
+	}
+	descriptor, descriptorIndex, err := ref.getManifestDescriptor(index)
 	if err != nil {
 		return err
 	}

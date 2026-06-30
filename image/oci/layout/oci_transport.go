@@ -213,12 +213,7 @@ func parseJSON[T any](path string) (*T, error) {
 	return obj, nil
 }
 
-func (ref ociReference) getManifestDescriptor() (imgspecv1.Descriptor, int, error) {
-	index, err := ref.getIndex()
-	if err != nil {
-		return imgspecv1.Descriptor{}, -1, err
-	}
-
+func (ref ociReference) getManifestDescriptor(index *imgspecv1.Index) (imgspecv1.Descriptor, int, error) {
 	switch {
 	case ref.image != "" && ref.sourceIndex != -1: // Coverage: newReference refuses to create such references.
 		return imgspecv1.Descriptor{}, -1, fmt.Errorf("Internal error: Cannot have both ref %s and source index @%d",
@@ -263,7 +258,11 @@ func LoadManifestDescriptor(imgRef types.ImageReference) (imgspecv1.Descriptor, 
 	if !ok {
 		return imgspecv1.Descriptor{}, errors.New("error typecasting, need type ociRef")
 	}
-	md, _, err := ociRef.getManifestDescriptor()
+	index, err := ociRef.getIndex()
+	if err != nil {
+		return imgspecv1.Descriptor{}, err
+	}
+	md, _, err := ociRef.getManifestDescriptor(index)
 	return md, err
 }
 
