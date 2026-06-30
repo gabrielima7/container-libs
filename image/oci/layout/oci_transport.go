@@ -2,10 +2,8 @@ package layout
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -187,30 +185,6 @@ func (ref ociReference) PolicyConfigurationNamespaces() []string {
 // WARNING: This may not do the right thing for a manifest list, see image.FromSource for details.
 func (ref ociReference) NewImage(ctx context.Context, sys *types.SystemContext) (types.ImageCloser, error) {
 	return image.FromReference(ctx, sys, ref)
-}
-
-// getIndex returns a pointer to the index references by this ociReference. If an error occurs opening an index nil is returned together
-// with an error.
-func (ref ociReference) getIndex() (*imgspecv1.Index, error) {
-	return parseIndex(ref.indexPath())
-}
-
-func parseIndex(path string) (*imgspecv1.Index, error) {
-	return parseJSON[imgspecv1.Index](path)
-}
-
-func parseJSON[T any](path string) (*T, error) {
-	content, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer content.Close()
-
-	obj := new(T)
-	if err := json.NewDecoder(content).Decode(obj); err != nil {
-		return nil, err
-	}
-	return obj, nil
 }
 
 func (ref ociReference) getManifestDescriptor(index *imgspecv1.Index) (imgspecv1.Descriptor, int, error) {

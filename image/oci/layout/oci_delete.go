@@ -22,7 +22,7 @@ func (ref ociReference) DeleteImage(ctx context.Context, sys *types.SystemContex
 		sharedBlobsDir = sys.OCISharedBlobDirPath
 	}
 
-	index, err := ref.getIndex()
+	index, err := destGetIndex(ref)
 	if err != nil {
 		return err
 	}
@@ -59,7 +59,7 @@ func (ref ociReference) countBlobsForDescriptor(dest map[digest.Digest]int, desc
 	dest[descriptor.Digest]++
 	switch descriptor.MediaType {
 	case imgspecv1.MediaTypeImageManifest:
-		manifest, err := parseJSON[imgspecv1.Manifest](blobPath)
+		manifest, err := destParseJSON[imgspecv1.Manifest](blobPath)
 		if err != nil {
 			return err
 		}
@@ -68,7 +68,7 @@ func (ref ociReference) countBlobsForDescriptor(dest map[digest.Digest]int, desc
 			dest[layer.Digest]++
 		}
 	case imgspecv1.MediaTypeImageIndex:
-		index, err := parseIndex(blobPath)
+		index, err := destParseJSON[imgspecv1.Index](blobPath)
 		if err != nil {
 			return err
 		}
@@ -94,7 +94,7 @@ func (ref ociReference) countBlobsReferencedByIndex(destination map[digest.Diges
 // This takes in a map of the digest and their usage count in the manifest to be deleted
 // It will compare it to the digest usage in the root index, and return a set of the blobs that can be safely deleted
 func (ref ociReference) getBlobsToDelete(blobsUsedByDescriptorToDelete map[digest.Digest]int, sharedBlobsDir string) (*set.Set[digest.Digest], error) {
-	rootIndex, err := ref.getIndex()
+	rootIndex, err := destGetIndex(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func deleteBlob(blobPath string) error {
 }
 
 func (ref ociReference) deleteReferenceFromIndex(referenceIndex int) error {
-	index, err := ref.getIndex()
+	index, err := destGetIndex(ref)
 	if err != nil {
 		return err
 	}

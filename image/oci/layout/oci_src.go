@@ -3,6 +3,7 @@ package layout
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,7 +70,7 @@ func newImageSource(sys *types.SystemContext, ref ociReference) (private.ImageSo
 
 	client := &http.Client{}
 	client.Transport = tr
-	index, err := ref.getIndex()
+	index, err := srcGetIndex(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +106,21 @@ func (s *ociImageSource) Reference() types.ImageReference {
 func (s *ociImageSource) Close() error {
 	s.client.CloseIdleConnections()
 	return nil
+}
+
+// srcGetIndex reads an index within the OCI layout used in ref.
+func srcGetIndex(ref ociReference) (*imgspecv1.Index, error) {
+	content, err := os.Open(ref.indexPath())
+	if err != nil {
+		return nil, err
+	}
+	defer content.Close()
+
+	var index imgspecv1.Index
+	if err := json.NewDecoder(content).Decode(&index); err != nil {
+		return nil, err
+	}
+	return &index, nil
 }
 
 // GetManifest returns the image's manifest along with its MIME type (which may be empty when it can't be determined but the manifest is available).
@@ -254,7 +270,7 @@ func LoadManifestDescriptor(imgRef types.ImageReference) (imgspecv1.Descriptor, 
 	if !ok {
 		return imgspecv1.Descriptor{}, errors.New("error typecasting, need type ociRef")
 	}
-	index, err := ociRef.getIndex()
+	index, err := srcGetIndex(ociRef)
 	if err != nil {
 		return imgspecv1.Descriptor{}, err
 	}

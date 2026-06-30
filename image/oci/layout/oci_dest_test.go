@@ -77,7 +77,7 @@ func TestPutManifestAppendsToExistingManifest(t *testing.T) {
 	require.True(t, ok)
 
 	// initially we have one manifest
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(index.Manifests), "Unexpected number of manifests")
 
@@ -87,7 +87,7 @@ func TestPutManifestAppendsToExistingManifest(t *testing.T) {
 
 	putTestManifest(t, ociRef2.(ociReference), tmpDir)
 
-	index, err = ociRef.getIndex()
+	index, err = destGetIndex(ociRef)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(index.Manifests), "Unexpected number of manifests")
 }
@@ -103,7 +103,7 @@ func TestPutManifestTwice(t *testing.T) {
 	putTestManifest(t, ociRef, tmpDir)
 	putTestManifest(t, ociRef, tmpDir)
 
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	assert.NoError(t, err)
 	assert.Len(t, index.Manifests, 2, "Unexpected number of manifests")
 }
@@ -124,7 +124,7 @@ func TestPutTwoDifferentTags(t *testing.T) {
 	require.True(t, ok)
 	putTestManifest(t, ociRef, tmpDir)
 
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	assert.NoError(t, err)
 	assert.Len(t, index.Manifests, 3, "Unexpected number of manifests")
 	assert.Equal(t, "imageValue", index.Manifests[1].Annotations[imgspecv1.AnnotationRefName])

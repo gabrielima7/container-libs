@@ -101,7 +101,7 @@ func TestGetManifestDescriptor(t *testing.T) {
 		ref, err := NewReference(c.dir, c.image)
 		require.NoError(t, err)
 
-		index, err := ref.(ociReference).getIndex()
+		index, err := destGetIndex(ref.(ociReference))
 		require.NoError(t, err)
 		res, i, err := ref.(ociReference).getManifestDescriptor(index)
 		if c.expectedDescriptor != nil {

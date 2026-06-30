@@ -44,7 +44,7 @@ func newImageDestination(sys *types.SystemContext, ref ociReference) (private.Im
 	var index *imgspecv1.Index
 	if indexExists(ref) {
 		var err error
-		index, err = ref.getIndex()
+		index, err = destGetIndex(ref)
 		if err != nil {
 			return nil, err
 		}
@@ -410,4 +410,23 @@ func indexExists(ref ociReference) bool {
 		return false
 	}
 	return true
+}
+
+// destGetIndex reads an index within the OCI layout used in ref.
+func destGetIndex(ref ociReference) (*imgspecv1.Index, error) {
+	return destParseJSON[imgspecv1.Index](ref.indexPath())
+}
+
+func destParseJSON[T any](path string) (*T, error) {
+	content, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer content.Close()
+
+	obj := new(T)
+	if err := json.NewDecoder(content).Decode(obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
