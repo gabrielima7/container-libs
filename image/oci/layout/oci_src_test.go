@@ -199,3 +199,33 @@ func TestLoadManifestDescriptor(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, "index 6 is too large, only 2 entries available", err.Error())
 }
+
+func TestIndexFSPath(t *testing.T) {
+	res := indexFSPath()
+	assert.Equal(t, "index.json", res)
+}
+
+func TestReferenceBlobPath(t *testing.T) {
+	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	bp, err := blobFSPath("sha256:"+hex, false)
+	assert.NoError(t, err)
+	assert.Equal(t, "blobs/sha256/"+hex, bp)
+}
+
+func TestReferenceSharedBlobPathShared(t *testing.T) {
+	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	bp, err := blobFSPath("sha256:"+hex, true)
+	assert.NoError(t, err)
+	assert.Equal(t, "sha256/"+hex, bp)
+}
+
+func TestReferenceBlobPathInvalid(t *testing.T) {
+	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	for _, shared := range []bool{false, true} {
+		_, err := blobFSPath(hex, shared)
+		assert.ErrorContains(t, err, "unexpected digest reference "+hex)
+	}
+}

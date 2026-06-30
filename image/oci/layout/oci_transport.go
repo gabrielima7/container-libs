@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
-	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.podman.io/image/v5/directory/explicitfilepath"
 	"go.podman.io/image/v5/docker/reference"
@@ -235,24 +233,4 @@ func (ref ociReference) NewImageSource(ctx context.Context, sys *types.SystemCon
 // The caller must call .Close() on the returned ImageDestination.
 func (ref ociReference) NewImageDestination(ctx context.Context, sys *types.SystemContext) (types.ImageDestination, error) {
 	return newImageDestination(sys, ref)
-}
-
-// indexPath returns a path for the index.json within a directory using OCI conventions.
-func (ref ociReference) indexPath() string {
-	return filepath.Join(ref.dir, imgspecv1.ImageIndexFile)
-}
-
-// blobPath returns a path for a blob within a directory using OCI image-layout conventions.
-func (ref ociReference) blobPath(digest digest.Digest, sharedBlobDir string) (string, error) {
-	// Keep this consistent with destBlobPath()!
-	if err := digest.Validate(); err != nil {
-		return "", fmt.Errorf("unexpected digest reference %s: %w", digest, err)
-	}
-	var blobDir string
-	if sharedBlobDir != "" {
-		blobDir = sharedBlobDir
-	} else {
-		blobDir = filepath.Join(ref.dir, imgspecv1.ImageBlobsDir)
-	}
-	return filepath.Join(blobDir, digest.Algorithm().String(), digest.Encoded()), nil
 }

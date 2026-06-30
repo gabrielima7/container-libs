@@ -438,20 +438,18 @@ func destOciLayoutPath(ref ociReference) string {
 
 // destIndexPath returns a path for the index.json within a directory using OCI conventions.
 func destIndexPath(ref ociReference) string {
-	return filepath.Join(ref.dir, imgspecv1.ImageIndexFile)
+	return filepath.Join(ref.dir, filepath.FromSlash(indexFSPath()))
 }
 
 // destBlobPath returns a path for a blob within a directory using OCI image-layout conventions.
 func destBlobPath(ref ociReference, digest digest.Digest, sharedBlobDir string) (string, error) {
-	// Keep this consistent with ociReference.blobPath()!
-	if err := digest.Validate(); err != nil {
-		return "", fmt.Errorf("unexpected digest reference %s: %w", digest, err)
+	fsPath, err := blobFSPath(digest, sharedBlobDir != "")
+	if err != nil {
+		return "", err
 	}
-	var blobDir string
 	if sharedBlobDir != "" {
-		blobDir = sharedBlobDir
+		return filepath.Join(sharedBlobDir, filepath.FromSlash(fsPath)), nil
 	} else {
-		blobDir = filepath.Join(ref.dir, imgspecv1.ImageBlobsDir)
+		return filepath.Join(ref.dir, filepath.FromSlash(fsPath)), nil
 	}
-	return filepath.Join(blobDir, digest.Algorithm().String(), digest.Encoded()), nil
 }
