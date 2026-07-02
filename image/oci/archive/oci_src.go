@@ -181,12 +181,20 @@ func (s *ociArchiveImageSource) LayerInfosForCopy(ctx context.Context, instanceD
 
 // unpackedArchive owns a temporary directory with extracted contents of an archive
 type unpackedArchive struct {
-	tempDirectory   string
+	tempDirectory   string // May contain escaping symlinks, so it SHOULD NOT be used for direct filesystem accesses. Use root instead.
+	root            *os.Root
 	ociRefExtracted types.ImageReference
 }
 
-// deletes the temporary directory created
-func (t *unpackedArchive) Close() error {
+// Close deletes the temporary directory and releases other state.
+func (t *unpackedArchive) Close() (retErr error) {
+	if err := t.root.Close(); err != nil {
+		defer func() {
+			if retErr == nil {
+				retErr = err
+			}
+		}()
+	}
 	return os.RemoveAll(t.tempDirectory)
 }
 
@@ -215,7 +223,18 @@ func unpackArchive(sys *types.SystemContext, ref ociArchiveReference) (*unpacked
 		}
 	}()
 
-	ociRef, err := ocilayout.NewReference(tempDir, ref.image)
+	root, err := os.OpenRoot(tempDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if !succeeded {
+			root.Close()
+		}
+	}()
+
+	reader := ocilayout.NewReaderWithRoot(root)
+	ociRef, err := reader.NewReference(tempDir, ref.image)
 	if err != nil {
 		return nil, fmt.Errorf("creating oci reference: %w", err)
 	}
@@ -228,6 +247,7 @@ func unpackArchive(sys *types.SystemContext, ref ociArchiveReference) (*unpacked
 	succeeded = true
 	return &unpackedArchive{
 		tempDirectory:   tempDir,
+		root:            root,
 		ociRefExtracted: ociRef,
 	}, nil
 }
