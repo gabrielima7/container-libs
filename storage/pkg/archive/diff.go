@@ -200,6 +200,9 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 				}
 			} else {
 				originalBase := hdrBase[len(WhiteoutPrefix):]
+				if isInvalidWhiteoutTargetBaseName(originalBase) {
+					return 0, fmt.Errorf("invalid whiteout path %q", hdr.Name)
+				}
 				originalPath := filepath.Join(parentPath, originalBase) // Warning: this can refer to an existing (and escaping) symlink
 				if err := resetImmutable(originalPath, nil); err != nil {
 					return 0, err

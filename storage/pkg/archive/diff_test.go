@@ -327,6 +327,28 @@ func TestUnpackLayer(t *testing.T) {
 		contents := readdirNames(t, dest)
 		assert.Equal(t, []string{"unaffected"}, contents)
 	})
+	// Invalid whiteout base name
+	for _, suffix := range []string{"", ".", ".."} {
+		for _, dir := range []string{".", "dir"} {
+			t.Run(dir+"/"+suffix, func(t *testing.T) {
+				dest := t.TempDir()
+				whiteoutRelPath := dir + "/.wh." + suffix
+				reader := tarStream(t, []*tar.Header{
+					{Typeflag: tar.TypeDir, Name: dir, Mode: 0o700},
+					{Typeflag: tar.TypeReg, Name: whiteoutRelPath, Mode: 0o600},
+				}, hdrEditor)
+				_, err := UnpackLayer(dest, reader, nil)
+				assert.Error(t, err)
+				err = fileutils.Lexists(filepath.Join(dest, whiteoutRelPath))
+				require.Error(t, err)
+				assert.ErrorIs(t, err, os.ErrNotExist)
+				// The parent directory was not affected
+				fi, err := os.Lstat(filepath.Join(dest, dir))
+				require.NoError(t, err)
+				assert.True(t, fi.IsDir())
+			})
+		}
+	}
 	// Whiteout over an existing file
 	t.Run("whiteout over regular file", func(t *testing.T) {
 		dest := t.TempDir()
