@@ -48,6 +48,15 @@ func TestUnpackLayer(t *testing.T) {
 			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "../victim", Mode: 0o755},
 			{Typeflag: tar.TypeReg, Name: "symlink/hello", Mode: 0o600},
 		},
+		{ // Overwrite through an absolute symlink to directory
+			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "@TOP@/victim", Mode: 0o644},
+			{Typeflag: tar.TypeReg, Name: "symlink/hello", Mode: 0o600},
+		},
+		{ // Overwrite through symlink to directory using paths that _look_ innocuous
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c", Linkname: "../..", Mode: 0o755}, // Points at the root
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c/d", Linkname: "..", Mode: 0o755},  // = root/..
+			{Typeflag: tar.TypeReg, Name: "a/b/c/d/victim/hello", Mode: 0o600},
+		},
 		{ // Overwrite through an escaping symlink directly to victim
 			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "../victim/hello", Mode: 0o755},
 			{Typeflag: tar.TypeReg, Name: "symlink", Mode: 0o600},
@@ -56,12 +65,37 @@ func TestUnpackLayer(t *testing.T) {
 			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "@TOP@/victim/hello", Mode: 0o644},
 			{Typeflag: tar.TypeReg, Name: "symlink", Mode: 0o600},
 		},
+		{ // Overwrite through symlink directly to victim using paths that _look_ innocuous
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c", Linkname: "../..", Mode: 0o755},                   // Points at the root
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c/symlink", Linkname: "../victim/hello", Mode: 0o755}, // = root/../victim/hello
+			{Typeflag: tar.TypeReg, Name: "a/b/c/symlink", Mode: 0o600},
+		},
 	} {
 		t.Run(fmt.Sprintf("Breakout%d", i), func(t *testing.T) {
 			err := testBreakout(t, breakoutUnpack, headers)
 			assert.NoError(t, err)
 		})
 	}
+	// Symbolic links are interpreted relative to the destination.
+	t.Run("symlinks", func(t *testing.T) {
+		dest := t.TempDir()
+		for i := range []int{1, 2} {
+			err := os.Mkdir(filepath.Join(dest, fmt.Sprintf("dir%d", i)), 0o700)
+			require.NoError(t, err)
+		}
+		err := os.Symlink("../../../dir2", filepath.Join(dest, "dir1", "relative"))
+		require.NoError(t, err)
+		err = os.Symlink("/dir2", filepath.Join(dest, "dir1", "absolute"))
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "dir1/relative/through-relative", Mode: 0o600},
+			{Typeflag: tar.TypeReg, Name: "dir1/absolute/through-absolute", Mode: 0o600},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		assert.NoError(t, err)
+		assert.FileExists(t, filepath.Join(dest, "dir2", "through-relative"))
+		assert.FileExists(t, filepath.Join(dest, "dir2", "through-absolute"))
+	})
 
 	for _, preexisting := range []bool{true, false} {
 		for _, destSuffix := range []string{"", "/"} {
@@ -266,8 +300,16 @@ func TestUnpackLayer(t *testing.T) {
 		require.NoError(t, err)
 		contents := readdirNames(t, victim)
 		assert.Equal(t, []string{"file"}, contents) // The target of an escaping symlink is unaffected
+		// The symlink path is interpreted as a missing parent directory within dest, and created:
+		// Warning: tar archives which use symlinks within parent directories are questionably
+		// valid (they are never created through a “normal” archive creation process), we don’t
+		// promise this will continue to work.
+		symlinkResult := filepath.Join(dest, victim)
+		fi, err := os.Lstat(symlinkResult)
+		require.NoError(t, err)
+		assert.True(t, fi.IsDir())
 		// The symlink itself is not affected.
-		fi, err := os.Lstat(symlinkPath)
+		fi, err = os.Lstat(symlinkPath)
 		require.NoError(t, err)
 		assert.True(t, fi.Mode()&os.ModeSymlink != 0)
 	})
@@ -533,10 +575,45 @@ func TestApplyLayerInvalidHardlink(t *testing.T) {
 				Mode:     0o644,
 			},
 		},
+		{ // Linking to paths that _look_ innocuous
+			{
+				Name:     "a/b/c",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "../..", // Points at the root
+				Mode:     0o755,
+			},
+			{
+				Name:     "a/b/c/d",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "..", // = root/..
+				Mode:     0o755,
+			},
+			{
+				Name:     "hardlink",
+				Typeflag: tar.TypeLink,
+				Linkname: "a/b/c/d/victim/hello",
+				Mode:     0o644,
+			},
+		},
+		{ // Linking through absolute symlinks
+			{
+				Name:     "symlink",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "@TOP@/victim",
+				Mode:     0o644,
+			},
+			{
+				Name:     "hardlink",
+				Typeflag: tar.TypeLink,
+				Linkname: "symlink/hello",
+				Mode:     0o644,
+			},
+		},
 	} {
-		if err := testBreakout(t, breakoutApplyLayer, headers); err != nil {
-			t.Fatalf("i=%d. %v", i, err)
-		}
+		t.Run(fmt.Sprintf("i=%d", i), func(t *testing.T) {
+			err := testBreakout(t, breakoutApplyLayer, headers)
+			assert.NoError(t, err)
+		})
 	}
 }
 
@@ -616,10 +693,43 @@ func TestApplyLayerInvalidSymlink(t *testing.T) {
 				Mode:     0o644,
 			},
 		},
+		{ // Writing to paths that _look_ innocuous
+			{
+				Name:     "a/b/c",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "../..", // Points at the root
+				Mode:     0o755,
+			},
+			{
+				Name:     "a/b/c/d",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "..", // = root/..
+				Mode:     0o755,
+			},
+			{
+				Name:     "a/b/c/d/victim/hello",
+				Typeflag: tar.TypeReg,
+				Mode:     0o644,
+			},
+		},
+		{ // Writing through absolute symlinks
+			{
+				Name:     "symlink",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "@TOP@/victim",
+				Mode:     0o644,
+			},
+			{
+				Name:     "symlink/hello",
+				Typeflag: tar.TypeReg,
+				Mode:     0o644,
+			},
+		},
 	} {
-		if err := testBreakout(t, breakoutApplyLayer, headers); err != nil {
-			t.Fatalf("i=%d. %v", i, err)
-		}
+		t.Run(fmt.Sprintf("i=%d", i), func(t *testing.T) {
+			err := testBreakout(t, breakoutApplyLayer, headers)
+			assert.NoError(t, err)
+		})
 	}
 }
 

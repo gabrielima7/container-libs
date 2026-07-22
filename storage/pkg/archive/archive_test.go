@@ -272,6 +272,15 @@ func TestUnpack(t *testing.T) {
 			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "../victim", Mode: 0o755},
 			{Typeflag: tar.TypeReg, Name: "symlink/hello", Mode: 0o600},
 		},
+		{ // Overwrite through an absolute symlink to directory
+			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "@TOP@/victim", Mode: 0o644},
+			{Typeflag: tar.TypeReg, Name: "symlink/hello", Mode: 0o600},
+		},
+		{ // Overwrite through symlink to directory using paths that _look_ innocuous
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c", Linkname: "../..", Mode: 0o755}, // Points at the root
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c/d", Linkname: "..", Mode: 0o755},  // = root/..
+			{Typeflag: tar.TypeReg, Name: "a/b/c/d/victim/hello", Mode: 0o600},
+		},
 		{ // Overwrite through an escaping symlink directly to victim
 			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "../victim/hello", Mode: 0o755},
 			{Typeflag: tar.TypeReg, Name: "symlink", Mode: 0o600},
@@ -280,12 +289,37 @@ func TestUnpack(t *testing.T) {
 			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "@TOP@/victim/hello", Mode: 0o644},
 			{Typeflag: tar.TypeReg, Name: "symlink", Mode: 0o600},
 		},
+		{ // Overwrite through symlink directly to victim using paths that _look_ innocuous
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c", Linkname: "../..", Mode: 0o755},                   // Points at the root
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c/symlink", Linkname: "../victim/hello", Mode: 0o755}, // = root/../victim/hello
+			{Typeflag: tar.TypeReg, Name: "a/b/c/symlink", Mode: 0o600},
+		},
 	} {
 		t.Run(fmt.Sprintf("Breakout%d", i), func(t *testing.T) {
 			err := testBreakout(t, breakoutUnpack, headers)
 			assert.NoError(t, err)
 		})
 	}
+	// Symbolic links are interpreted relative to the destination.
+	t.Run("symlinks", func(t *testing.T) {
+		dest := t.TempDir()
+		for i := range []int{1, 2} {
+			err := os.Mkdir(filepath.Join(dest, fmt.Sprintf("dir%d", i)), 0o700)
+			require.NoError(t, err)
+		}
+		err := os.Symlink("../../../dir2", filepath.Join(dest, "dir1", "relative"))
+		require.NoError(t, err)
+		err = os.Symlink("/dir2", filepath.Join(dest, "dir1", "absolute"))
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "dir1/relative/through-relative", Mode: 0o600},
+			{Typeflag: tar.TypeReg, Name: "dir1/absolute/through-absolute", Mode: 0o600},
+		}, hdrEditor)
+		err = Unpack(reader, dest, &TarOptions{})
+		assert.NoError(t, err)
+		assert.FileExists(t, filepath.Join(dest, "dir2", "through-relative"))
+		assert.FileExists(t, filepath.Join(dest, "dir2", "through-absolute"))
+	})
 
 	for _, preexisting := range []bool{true, false} {
 		for _, destSuffix := range []string{"", "/"} {
@@ -1022,6 +1056,15 @@ func TestExtractTarFileEntry(t *testing.T) {
 				assert.Equal(t, "/dangling/absolute/target", link)
 			},
 		},
+		{
+			hdr:          tar.Header{Typeflag: tar.TypeSymlink, Linkname: "../../etc/passwd/arbitrary/escaping/symlink", Mode: 0o700},
+			expectedType: fs.ModeSymlink,
+			assertion: func(path string) {
+				link, err := os.Readlink(path)
+				require.NoError(t, err)
+				assert.Equal(t, "../../etc/passwd/arbitrary/escaping/symlink", link)
+			},
+		},
 		{ // Even if we create a symlink to an existing file, we don't touch the target at all.
 			hdr:          tar.Header{Typeflag: tar.TypeSymlink, Linkname: symlinkVictim, Mode: 0o700},
 			expectedType: fs.ModeSymlink,
@@ -1119,8 +1162,17 @@ func TestExtractTarFileEntry(t *testing.T) {
 	}{
 		{symlinks: [][2]string{{"symlink", "unused"}}, linkName: "../victimDir/victim"},
 		{symlinks: [][2]string{{"symlink", "unused"}}, linkName: "TOP/victimDir/victim"},
+		{symlinks: [][2]string{{"symlink", "../victimDir"}}, linkName: "symlink/victim"},
+		{symlinks: [][2]string{{"symlink", "TOP/victimDir"}}, linkName: "symlink/victim"},
 		{symlinks: [][2]string{{"symlink", "../victimDir/victim"}}, linkName: "symlink"},
 		{symlinks: [][2]string{{"symlink", "TOP/victimDir/victim"}}, linkName: "symlink"},
+		{ // symlink targets that do not individually escape, when looking purely at the syntax
+			symlinks: [][2]string{
+				{"a/b/c", "../.."}, // Points at the root
+				{"a/b/c/d", ".."},  // = root/..
+			},
+			linkName: "a/b/c/d/victimDir/victim",
+		},
 	} {
 		t.Run(fmt.Sprintf("%q|%s", c.symlinks, c.linkName), func(t *testing.T) {
 			topDir := t.TempDir()

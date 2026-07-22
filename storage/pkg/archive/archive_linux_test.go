@@ -363,6 +363,31 @@ func TestUnpackWhiteouts(t *testing.T) {
 		assert.True(t, fi.IsDir())
 		checkOpaqueness(t, filepath.Join(dest, "dir"), "y")
 	})
+	// WhiteoutOpaqueDir targeting a symlink
+	t.Run("opaque symlink", func(t *testing.T) {
+		victim := t.TempDir()
+		dest := t.TempDir()
+		symlinkPath := filepath.Join(dest, "symlink")
+		err := os.Symlink(victim, symlinkPath)
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "symlink/.wh..wh..opq", Mode: 0o600},
+		}, hdrEditor)
+		err = Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+		require.NoError(t, err)
+		checkOpaqueness(t, victim, "") // The target of an escaping symlink is unaffected
+		// The symlink path is interpreted as a missing parent directory within dest, and created:
+		// Warning: tar archives which use symlinks within parent directories are questionably
+		// valid (they are never created through a “normal” archive creation process), we don’t
+		// promise this will continue to work.
+		symlinkResult := filepath.Join(dest, victim)
+		fi, err := os.Lstat(symlinkResult)
+		require.NoError(t, err)
+		assert.True(t, fi.IsDir())
+		checkOpaqueness(t, symlinkResult, "y")
+		// The symlink itself is not affected.
+		checkOpaqueness(t, symlinkPath, "")
+	})
 
 	// Ordinary whiteout
 	t.Run("whiteout", func(t *testing.T) {

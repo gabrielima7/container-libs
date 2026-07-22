@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,7 @@ func tarStream(t *testing.T, headers []*tar.Header, editor func(*tar.Header)) io
 // testBreakout is a helper function that, within the provided `tmpdir` directory,
 // creates a `victim` folder with a generated `hello` file in it.
 // `untar` extracts to a directory named `dest`, the tar file created from `headers`.
+// `headers` may contain a @TOP@ placeholder in .Linkname, pointing to a parent of `victim`.
 //
 // Here are the tested scenarios:
 // - removed `victim` folder				(write)
@@ -82,13 +84,15 @@ func testBreakout(t *testing.T, untarFn func(string, io.Reader) error, headers [
 		return err
 	}
 
-	reader := tarStream(t, headers, func(hdr *tar.Header) {})
+	reader := tarStream(t, headers, func(hdr *tar.Header) {
+		hdr.Linkname = strings.Replace(hdr.Linkname, "@TOP@", tmpdir, 1)
+	})
 
 	if err := untarFn(dest, reader); err != nil {
 		if _, ok := err.(breakoutError); !ok {
 			// If untar returns an error unrelated to an archive breakout,
 			// then consider this an unexpected error and abort.
-			return err
+			return fmt.Errorf("non-breakout untar error: %w", err)
 		}
 		// Here, untar detected the breakout.
 		// Let's move on verifying that indeed there was no breakout.
@@ -130,7 +134,7 @@ func testBreakout(t *testing.T, untarFn func(string, io.Reader) error, headers [
 	defer f.Close()
 	b, err := io.ReadAll(f)
 	if err != nil {
-		return err
+		return fmt.Errorf("reading hello %q: %w", hello, err)
 	}
 	fi, err := f.Stat()
 	if err != nil {
@@ -162,10 +166,17 @@ func testBreakout(t *testing.T, untarFn func(string, io.Reader) error, headers [
 			// skip file if error
 			return nil //nolint: nilerr
 		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			// Not following escaping symlinks is the responsibility of the caller of untar.
+			// An ideal caller of untar would be using os.Root.ReadFile, but that does not return
+			// an externally-detectable error type when encountering an escaping symlink;
+			// so, check separately
+			return nil
+		}
 		b, err := os.ReadFile(path)
 		if err != nil {
 			// Houston, we have a problem. Aborting (space)walk.
-			return err
+			return fmt.Errorf("reading %q inside archive: %w", path, err)
 		}
 		if bytes.Equal(helloData, b) {
 			return fmt.Errorf("archive breakout: file %q has been accessed via %q", hello, path)
