@@ -712,6 +712,7 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 
 	typeFlag := hdr.Typeflag
 	mask := hdrInfo.Mode()
+	var hardlinkTargetPath string
 
 	// update also the implementation of ForceMask in pkg/chunked
 	if forceMask != nil {
@@ -770,6 +771,7 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 		if err := handleLLink(targetPath, path); err != nil {
 			return err
 		}
+		hardlinkTargetPath = targetPath
 
 	case tar.TypeSymlink:
 		// 	path 				-> hdr.Linkname = targetPath
@@ -810,7 +812,7 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 
 	// There is no LChmod, so ignore mode for symlink. Also, this
 	// must happen after chown, as that can modify the file mode
-	if err := handleLChmod(hdr, path, hdrInfo, forceMask); err != nil {
+	if err := handleLChmod(hdr, path, hardlinkTargetPath, hdrInfo, forceMask); err != nil {
 		return err
 	}
 
@@ -822,7 +824,7 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 
 	// system.Chtimes doesn't support a NOFOLLOW flag atm
 	if hdr.Typeflag == tar.TypeLink {
-		if fi, err := os.Lstat(hdr.Linkname); err == nil && (fi.Mode()&os.ModeSymlink == 0) {
+		if fi, err := os.Lstat(hardlinkTargetPath); err == nil && (fi.Mode()&os.ModeSymlink == 0) {
 			if err := system.Chtimes(path, aTime, hdr.ModTime); err != nil {
 				return err
 			}

@@ -67,7 +67,7 @@ func handleTarTypeBlockCharFifo(hdr *tar.Header, path string) error {
 	return nil
 }
 
-func handleLChmod(hdr *tar.Header, path string, hdrInfo os.FileInfo, forceMask *os.FileMode) error {
+func handleLChmod(_ *tar.Header, _, _ string, _ os.FileInfo, _ *os.FileMode) error {
 	return nil
 }
 

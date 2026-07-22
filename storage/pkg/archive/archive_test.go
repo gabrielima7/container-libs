@@ -1097,7 +1097,7 @@ func TestExtractTarFileEntry(t *testing.T) {
 		if !c.isSymlink || runtime.GOOS != "linux" {
 			assert.Equal(t, fs.FileMode(hdr.Mode), linkInfo.Mode().Perm())
 		}
-		if false { // Does not work yet
+		if !c.isSymlink { // We don’t change times if the target is a symlink.
 			assert.Equal(t, mtime, linkInfo.ModTime())
 			assertAtime(t, atime, linkInfo)
 		}
