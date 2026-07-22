@@ -18,9 +18,31 @@ func breakoutUntar(dest string, r io.Reader) error {
 	return Untar(r, dest, nil)
 }
 
+func breakoutUnpack(dest string, r io.Reader) error {
+	return Unpack(r, dest, &TarOptions{})
+}
+
 func breakoutApplyLayer(dest string, r io.Reader) error {
 	_, err := ApplyLayer(dest, r)
 	return err
+}
+
+// tarStream returns a reader for a tar stream containing the provided headers,
+// with each header first updated by editor.
+func tarStream(t *testing.T, headers []*tar.Header, editor func(*tar.Header)) io.Reader {
+	reader, writer := io.Pipe()
+	go func() {
+		tw := tar.NewWriter(writer)
+		for _, hdr := range headers {
+			hdr := *hdr
+			editor(&hdr)
+			err := tw.WriteHeader(&hdr)
+			require.NoError(t, err)
+		}
+		tw.Close()
+		writer.Close()
+	}()
+	return reader
 }
 
 // testBreakout is a helper function that, within the provided `tmpdir` directory,
@@ -60,15 +82,7 @@ func testBreakout(t *testing.T, untarFn func(string, io.Reader) error, headers [
 		return err
 	}
 
-	reader, writer := io.Pipe()
-	go func() {
-		tw := tar.NewWriter(writer)
-		for _, hdr := range headers {
-			err := tw.WriteHeader(hdr)
-			require.NoError(t, err)
-		}
-		tw.Close()
-	}()
+	reader := tarStream(t, headers, func(hdr *tar.Header) {})
 
 	if err := untarFn(dest, reader); err != nil {
 		if _, ok := err.(breakoutError); !ok {
