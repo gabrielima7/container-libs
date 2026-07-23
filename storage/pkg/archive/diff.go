@@ -88,6 +88,16 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 			}
 		}
 
+		// This check is INSUFFICIENT to prevent breakouts if hdr.Name contains symlink parents;
+		// we preserve it only to keep the existing restrictions on acceptable inputs.
+		insecureRel, err := filepath.Rel(dest, filepath.Join(dest, hdr.Name))
+		if err != nil {
+			return 0, err
+		}
+		if insecureRel == ".." || strings.HasPrefix(insecureRel, ".."+string(os.PathSeparator)) {
+			return 0, breakoutError(fmt.Errorf("%q is outside of %q", hdr.Name, dest))
+		}
+
 		// This does not detect attempts to break out, it just silently restricts them to dest.
 		// We could use os.Root to create files instead — that fails on breakout attempts, but
 		// Go does not include all operations we need as of Go 1.25, so that would be a larger

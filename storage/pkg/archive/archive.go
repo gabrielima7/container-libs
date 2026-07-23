@@ -768,6 +768,19 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 		}
 
 	case tar.TypeLink:
+		// Check for hardlink breakout. This is INSUFFICIENT as a check if the path includes symlinks;
+		// we preserve it only to keep the existing restrictions on acceptable inputs.
+		insecureTargetPath := filepath.Join(extractDir, hdr.Linkname)
+		if insecureTargetPath != extractDir {
+			insecureExpectedPrefix := extractDir
+			if insecureExpectedPrefix != string(os.PathSeparator) {
+				insecureExpectedPrefix += string(os.PathSeparator)
+			}
+			if !strings.HasPrefix(insecureTargetPath, insecureExpectedPrefix) {
+				return breakoutError(fmt.Errorf("invalid hardlink %q", hdr.Linkname))
+			}
+		}
+
 		targetHdrDir, targetHdrBase, err := createpath.SplitPath(hdr.Linkname)
 		if err != nil {
 			return err
@@ -1145,6 +1158,16 @@ loop:
 			if strings.HasPrefix(hdr.Name, exclude) {
 				continue loop
 			}
+		}
+
+		// This check is INSUFFICIENT to detect breakouts if hdr.Name contains symlink parents;
+		// we preserve it only to keep the existing restrictions on acceptable inputs.
+		insecureRel, err := filepath.Rel(dest, filepath.Join(dest, hdr.Name))
+		if err != nil {
+			return err
+		}
+		if insecureRel == ".." || strings.HasPrefix(insecureRel, ".."+string(os.PathSeparator)) {
+			return breakoutError(fmt.Errorf("%q is outside of %q", hdr.Name, dest))
 		}
 
 		// This does not detect attempts to break out, it just silently restricts them to dest.

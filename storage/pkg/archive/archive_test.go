@@ -213,6 +213,9 @@ func TestUnpack(t *testing.T) {
 		{Typeflag: tar.TypeFifo, Name: "fifo", Mode: 0o600},
 		{Typeflag: tar.TypeLink, Name: "link", Linkname: "regular", Mode: 0o600},
 		{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "dangling/local/target", Mode: 0o700},
+		{Typeflag: tar.TypeDir, Name: "bin", Mode: 0o700},
+		{Typeflag: tar.TypeReg, Name: "bin/[", Mode: 0o600},
+		{Typeflag: tar.TypeLink, Name: "bin/test", Linkname: "bin/[", Mode: 0o600},
 	}, hdrEditor)
 	err := Unpack(reader, dest, &TarOptions{})
 	assert.NoError(t, err)
