@@ -14,14 +14,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var testUntarFns = map[string]func(string, io.Reader) error{
-	"untar": func(dest string, r io.Reader) error {
-		return Untar(r, dest, nil)
-	},
-	"applylayer": func(dest string, r io.Reader) error {
-		_, err := ApplyLayer(dest, r)
-		return err
-	},
+func breakoutUntar(dest string, r io.Reader) error {
+	return Untar(r, dest, nil)
+}
+
+func breakoutApplyLayer(dest string, r io.Reader) error {
+	_, err := ApplyLayer(dest, r)
+	return err
 }
 
 // testBreakout is a helper function that, within the provided `tmpdir` directory,
@@ -36,7 +35,7 @@ var testUntarFns = map[string]func(string, io.Reader) error{
 // - file in `dest` with same content as `victim/hello` (read)
 //
 // When using testBreakout make sure you cover one of the scenarios listed above.
-func testBreakout(t *testing.T, untarFn string, headers []*tar.Header) error {
+func testBreakout(t *testing.T, untarFn func(string, io.Reader) error, headers []*tar.Header) error {
 	tmpdir := t.TempDir()
 
 	dest := filepath.Join(tmpdir, "dest")
@@ -71,11 +70,7 @@ func testBreakout(t *testing.T, untarFn string, headers []*tar.Header) error {
 		tw.Close()
 	}()
 
-	untar := testUntarFns[untarFn]
-	if untar == nil {
-		return fmt.Errorf("could not find untar function %q in testUntarFns", untarFn)
-	}
-	if err := untar(dest, reader); err != nil {
+	if err := untarFn(dest, reader); err != nil {
 		if _, ok := err.(breakoutError); !ok {
 			// If untar returns an error unrelated to an archive breakout,
 			// then consider this an unexpected error and abort.

@@ -35,7 +35,7 @@ func TestApplyLayerInvalidFilenames(t *testing.T) {
 			},
 		},
 	} {
-		if err := testBreakout(t, "applylayer", headers); err != nil {
+		if err := testBreakout(t, breakoutApplyLayer, headers); err != nil {
 			t.Fatalf("i=%d. %v", i, err)
 		}
 	}
@@ -118,7 +118,7 @@ func TestApplyLayerInvalidHardlink(t *testing.T) {
 			},
 		},
 	} {
-		if err := testBreakout(t, "applylayer", headers); err != nil {
+		if err := testBreakout(t, breakoutApplyLayer, headers); err != nil {
 			t.Fatalf("i=%d. %v", i, err)
 		}
 	}
@@ -201,7 +201,7 @@ func TestApplyLayerInvalidSymlink(t *testing.T) {
 			},
 		},
 	} {
-		if err := testBreakout(t, "applylayer", headers); err != nil {
+		if err := testBreakout(t, breakoutApplyLayer, headers); err != nil {
 			t.Fatalf("i=%d. %v", i, err)
 		}
 	}
