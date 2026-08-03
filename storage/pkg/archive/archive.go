@@ -1288,7 +1288,14 @@ loop:
 		}
 		path := filepath.Join(parentPath, hdrBase) // Warning: this can refer to an existing (and escaping) symlink
 
-		if err := system.Chtimes(path, hdr.AccessTime, hdr.ModTime); err != nil {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() {
+			continue // The directory was replaced; whatever happened here, hdr is no longer relevant.
+		}
+		if err := system.Chtimes(path, hdr.AccessTime, hdr.ModTime); err != nil { // Note: follows symlinks
 			return err
 		}
 		if err := WriteFileFlagsFromTarHeader(path, hdr); err != nil {

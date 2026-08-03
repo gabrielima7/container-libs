@@ -300,7 +300,14 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 		}
 		path := filepath.Join(parentPath, hdrBase)
 
-		if err := system.Chtimes(path, hdr.AccessTime, hdr.ModTime); err != nil {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return 0, err
+		}
+		if !fi.IsDir() {
+			continue // The directory was replaced; whatever happened here, hdr is no longer relevant.
+		}
+		if err := system.Chtimes(path, hdr.AccessTime, hdr.ModTime); err != nil { // Note: follows symlinks
 			return 0, err
 		}
 		if err := WriteFileFlagsFromTarHeader(path, hdr); err != nil {

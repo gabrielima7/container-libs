@@ -522,6 +522,28 @@ func TestUnpackLayer(t *testing.T) {
 			})
 		}
 	})
+	// The directory times code does not follow symlinks.
+	t.Run("directory times on symlink", func(t *testing.T) {
+		victim := t.TempDir()
+		fi1, err := os.Lstat(victim)
+		require.NoError(t, err)
+
+		dest = t.TempDir()
+		// An explicit FormatPAX is necessary, otherwise archive/tar prefers to use a simpler header which does not encode AccessTime,
+		reader = tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeDir, Name: "dir", Mode: 0o700, ModTime: mtime, AccessTime: atime, Format: tar.FormatPAX},
+			{Typeflag: tar.TypeSymlink, Name: "dir", Linkname: victim, Mode: 0o700},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		assert.NoError(t, err)
+		fi, err := os.Lstat(filepath.Join(dest, "dir"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.ModeSymlink, fi.Mode().Type())
+
+		fi2, err := os.Lstat(victim)
+		require.NoError(t, err)
+		assertCtimeMatches(t, fi2, fi1)
+	})
 
 	// Setting BSD flags of directories is untested
 }
