@@ -114,7 +114,20 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 		}
 		path := filepath.Join(parentPath, hdrBase) // Warning: this can refer to an existing (and escaping) symlink
 
-		if path != dest {
+		if path == dest {
+			// The caller has probably pre-created dest as a directory; we don’t know for sure, and it doesn’t really matter
+			// because SecureJoin works fine enough for non-existent paths, and because the "Not the root directory"
+			// code path below would create dest if necessary.
+			//
+			// The one thing we MUST NOT allow is creating "dest" as a symbolic link, because SecureJoin’s operation implicitly
+			// resolves that symlink before constraining the returned path.  We also must not allow replacing an existing directory
+			// with a symbolic link.
+			//
+			// Just refuse all non-directory paths here.
+			if hdr.Typeflag != tar.TypeDir {
+				return 0, fmt.Errorf("refusing to act on a non-directory entry as the archive root")
+			}
+		} else {
 			// Not the root directory, ensure that the parent directory exists.
 			// This happened in some tests where an image had a tarfile without any
 			// parent directories.
@@ -216,6 +229,7 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 			// The only exception is when it is a directory *and* the file from
 			// the layer is also a directory. Then we want to merge them (i.e.
 			// just apply the metadata from the layer).
+			// (Above, we have already refused to replace all of dest with a non-directory.)
 			//
 			// We always reset the immutable flag (if present) to allow metadata
 			// changes and to allow directory modification. The flag will be

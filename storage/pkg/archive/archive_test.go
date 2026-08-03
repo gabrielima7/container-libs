@@ -324,9 +324,48 @@ func TestUnpack(t *testing.T) {
 		assert.FileExists(t, filepath.Join(dest, "dir2", "through-absolute"))
 	})
 
+	// The destination must not be created/replaced as a non-directory.
 	for _, preexisting := range []bool{true, false} {
 		for _, destSuffix := range []string{"", "/"} {
 			for _, rootName := range []string{".", "/"} {
+				t.Run(fmt.Sprintf("symlink root dest=%s, preexisting=%t, root=%s", destSuffix, preexisting, rootName), func(t *testing.T) {
+					victim := t.TempDir()
+					victimFile := filepath.Join(victim, "file")
+					err := os.WriteFile(victimFile, []byte("content"), 0o600)
+					require.NoError(t, err)
+					fis := map[string]os.FileInfo{}
+					for _, path := range []string{victim, victimFile} {
+						fi, err := os.Lstat(path)
+						require.NoError(t, err)
+						fis[path] = fi
+					}
+
+					dest := filepath.Join(t.TempDir(), "dest")
+					if preexisting {
+						err := os.Mkdir(dest, 0o700)
+						require.NoError(t, err)
+					}
+
+					reader := tarStream(t, []*tar.Header{
+						{Typeflag: tar.TypeSymlink, Name: rootName, Linkname: victim, Mode: 0o700},
+						{Typeflag: tar.TypeReg, Name: filepath.Join(rootName, "file"), Mode: 0o600},
+					}, hdrEditor)
+					err = Unpack(reader, dest+destSuffix, &TarOptions{})
+					require.Error(t, err)
+
+					if preexisting {
+						fi, err := os.Lstat(dest)
+						require.NoError(t, err)
+						assert.True(t, fi.IsDir())
+					}
+					// The victim paths were not affected
+					for _, path := range []string{victim, victimFile} {
+						fi, err := os.Lstat(path)
+						require.NoError(t, err)
+						assertCtimeMatches(t, fi, fis[path])
+					}
+				})
+
 				// TypeDir entries for dest are accepted.
 				t.Run(fmt.Sprintf("dir root dest=%s, preexisting=%t, dir=%s", destSuffix, preexisting, rootName), func(t *testing.T) {
 					dest := filepath.Join(t.TempDir(), "dest")
