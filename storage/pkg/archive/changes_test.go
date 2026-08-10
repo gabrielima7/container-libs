@@ -41,11 +41,24 @@ type FileData struct {
 	permissions os.FileMode
 }
 
+// sampleReadOnlyMode is an os.FileMode permissions value which might be a read-only file _if possible_.
+var sampleReadOnlyMode = func() os.FileMode {
+	if runtime.GOOS == darwin {
+		// On macOS, idtools.SafeLchown writes the mode into an extended attribute;
+		// that doesn't work when the file's actual mode does not allow the current user to write.
+		//
+		// (b4da37ab89f2c0a0608bca84bd7300f57ab86a95, adding that, assumes the code will only be called
+		// with force_mask = 0700, but that's not what TestApplyLayer does.)
+		return 0o604
+	}
+	return 0o404
+}()
+
 func createSampleDir(t *testing.T, root string) {
 	files := []FileData{
 		{Regular, "file1", "file1\n", 0o600},
 		{Regular, "file2", "file2\n", 0o666},
-		{Regular, "file3", "file3\n", 0o404},
+		{Regular, "file3", "file3\n", sampleReadOnlyMode},
 		{Regular, "file4", "file4\n", 0o600},
 		{Regular, "file5", "file5\n", 0o600},
 		{Regular, "file6", "file6\n", 0o600},
@@ -185,7 +198,7 @@ func TestChangesWithChangesGH13590(t *testing.T) {
 	baseLayer := t.TempDir()
 
 	dir3 := path.Join(baseLayer, "dir1/dir2/dir3")
-	err := os.MkdirAll(dir3, 0o7400)
+	err := os.MkdirAll(dir3, 0o740)
 	require.NoError(t, err)
 
 	file := path.Join(dir3, "file.txt")
@@ -276,7 +289,7 @@ func mutateSampleDir(t *testing.T, root string) {
 	// Replace a file
 	err = os.RemoveAll(path.Join(root, "file3"))
 	require.NoError(t, err)
-	err = os.WriteFile(path.Join(root, "file3"), []byte("fileMM\n"), 0o404)
+	err = os.WriteFile(path.Join(root, "file3"), []byte("fileMM\n"), sampleReadOnlyMode)
 	require.NoError(t, err)
 
 	// Touch file
