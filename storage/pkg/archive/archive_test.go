@@ -690,16 +690,13 @@ func TestTarWithOptionsChownOptsAlwaysOverridesIdPair(t *testing.T) {
 		require.NoError(t, err)
 		tr := tar.NewReader(reader)
 		defer reader.Close()
-		for {
-			hdr, err := tr.Next()
-			if err == io.EOF {
-				// end of tar archive
-				break
-			}
-			require.NoError(t, err)
-			assert.Equal(t, hdr.Uid, testCase.expectedUID, "Uid equals expected value")
-			assert.Equal(t, hdr.Gid, testCase.expectedGID, "Gid equals expected value")
-		}
+		hdr, err := tr.Next()
+		require.NoError(t, err)
+		assert.Equal(t, hdr.Name, "1")
+		assert.Equal(t, hdr.Uid, testCase.expectedUID, "Uid equals expected value")
+		assert.Equal(t, hdr.Gid, testCase.expectedGID, "Gid equals expected value")
+		_, err = tr.Next()
+		assert.Equal(t, io.EOF, err)
 	}
 }
 
@@ -1280,10 +1277,6 @@ func (b *errorBuf) Write(d []byte) (int, error) {
 		return 0, b.err
 	}
 	return b.Buffer.Write(d)
-}
-
-func (b *errorBuf) Close() error {
-	return nil
 }
 
 func TestTarErrorHandling(t *testing.T) {

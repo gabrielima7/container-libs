@@ -213,6 +213,10 @@ func getInode(path string) (uint64, error) {
 }
 
 func TestTarWithBlockCharFifo(t *testing.T) {
+	if runtime.GOOS == darwin && os.Geteuid() != 0 { // This is almost certainly true on all platforms, but I only verified it on this one.
+		t.Skip("mknod() requires running the test as root")
+	}
+
 	origin := t.TempDir()
 
 	err := os.WriteFile(filepath.Join(origin, "1"), []byte("hello world"), 0o700)
