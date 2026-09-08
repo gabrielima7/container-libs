@@ -14,8 +14,6 @@ import (
 )
 
 func TestGetManifestDescriptor(t *testing.T) {
-	emptyDir := t.TempDir()
-
 	for _, c := range []struct {
 		dir, image         string
 		expectedDescriptor *imgspecv1.Descriptor // nil if a failure ie expected. errorIs / errorAs allows more specific checks.
@@ -23,11 +21,6 @@ func TestGetManifestDescriptor(t *testing.T) {
 		errorIs            error
 		errorAs            any
 	}{
-		{ // Index is missing
-			dir:                emptyDir,
-			image:              "",
-			expectedDescriptor: nil,
-		},
 		{ // A valid reference to the only manifest
 			dir:   "fixtures/manifest",
 			image: "",
@@ -108,7 +101,9 @@ func TestGetManifestDescriptor(t *testing.T) {
 		ref, err := NewReference(c.dir, c.image)
 		require.NoError(t, err)
 
-		res, i, err := ref.(ociReference).getManifestDescriptor()
+		index, err := destGetIndex(ref.(ociReference))
+		require.NoError(t, err)
+		res, i, err := ref.(ociReference).getManifestDescriptor(index)
 		if c.expectedDescriptor != nil {
 			require.NoError(t, err)
 			assert.Equal(t, c.expectedIndex, i)
@@ -123,26 +118,6 @@ func TestGetManifestDescriptor(t *testing.T) {
 			}
 		}
 	}
-
-	ref, err := NewIndexReference("fixtures/two_images_manifest", 0)
-	assert.NoError(t, err)
-	res, err := LoadManifestDescriptor(ref)
-	assert.NoError(t, err)
-	assert.Equal(t, imgspecv1.Descriptor{
-		MediaType: "application/vnd.oci.image.manifest.v1+json",
-		Digest:    "sha256:e692418e4cbaf90ca69d05a66403747baa33ee08806650b51fab815ad7fc331f",
-		Size:      7143,
-		Platform: &imgspecv1.Platform{
-			Architecture: "ppc64le",
-			OS:           "linux",
-		}}, res)
-
-	// Out of bounds
-	ref, err = NewIndexReference("fixtures/two_images_manifest", 6)
-	assert.NoError(t, err)
-	_, err = LoadManifestDescriptor(ref)
-	assert.Error(t, err)
-	assert.Equal(t, "index 6 is too large, only 2 entries available", err.Error())
 }
 
 func TestTransportName(t *testing.T) {
@@ -227,22 +202,40 @@ func TestNewReference(t *testing.T) {
 	)
 
 	tmpDir := t.TempDir()
-
-	ref, err := NewReference(tmpDir, imageValue)
+	root, err := os.OpenRoot(tmpDir)
 	require.NoError(t, err)
-	ociRef, ok := ref.(ociReference)
-	require.True(t, ok)
-	assert.Equal(t, tmpDir, ociRef.dir)
-	assert.Equal(t, imageValue, ociRef.image)
-	assert.Equal(t, -1, ociRef.sourceIndex)
+	defer root.Close()
+	reader := NewReaderWithRoot(root)
+	// NewReference and reader.NewReference should result in ~the same behavior
+	newReferences := []struct {
+		fn             func(dir string, image string) (types.ImageReference, error)
+		expectedReader *Reader
+	}{
+		{NewReference, nil},
+		{reader.NewReference, reader},
+	}
 
-	ref, err = NewReference(tmpDir, noImageValue)
-	require.NoError(t, err)
-	ociRef, ok = ref.(ociReference)
-	require.True(t, ok)
-	assert.Equal(t, tmpDir, ociRef.dir)
-	assert.Equal(t, noImageValue, ociRef.image)
-	assert.Equal(t, -1, ociRef.sourceIndex)
+	for _, nr := range newReferences {
+		ref, err := nr.fn(tmpDir, imageValue)
+		require.NoError(t, err)
+		ociRef, ok := ref.(ociReference)
+		require.True(t, ok)
+		assert.Equal(t, tmpDir, ociRef.dir)
+		assert.Equal(t, imageValue, ociRef.image)
+		assert.Equal(t, -1, ociRef.sourceIndex)
+		assert.Equal(t, nr.expectedReader, ociRef.reader)
+	}
+
+	for _, nr := range newReferences {
+		ref, err := nr.fn(tmpDir, noImageValue)
+		require.NoError(t, err)
+		ociRef, ok := ref.(ociReference)
+		require.True(t, ok)
+		assert.Equal(t, tmpDir, ociRef.dir)
+		assert.Equal(t, noImageValue, ociRef.image)
+		assert.Equal(t, -1, ociRef.sourceIndex)
+		assert.Equal(t, nr.expectedReader, ociRef.reader)
+	}
 
 	_, err = NewReference(tmpDir+"/thisparentdoesnotexist/something", imageValue)
 	assert.Error(t, err)
@@ -254,7 +247,11 @@ func TestNewReference(t *testing.T) {
 	assert.Error(t, err)
 
 	// Test private newReference
-	_, err = newReference(tmpDir, imageValue, 1)
+	_, err = newReference(tmpDir, imageValue, 1, nil)
+	assert.Error(t, err)
+
+	nonMatchingDir := t.TempDir() // does not match root
+	_, err = reader.NewReference(nonMatchingDir, "")
 	assert.Error(t, err)
 }
 
@@ -293,9 +290,9 @@ func TestNewIndexReference(t *testing.T) {
 	}
 
 	// Test private newReference
-	_, err = newReference(tmpDir, imageValue, 1)
+	_, err = newReference(tmpDir, imageValue, 1, nil)
 	assert.Error(t, err)
-	_, err = newReference(tmpDir, "", -3)
+	_, err = newReference(tmpDir, "", -3, nil)
 	assert.Error(t, err)
 }
 
@@ -472,50 +469,4 @@ func TestReferenceNewImageDestination(t *testing.T) {
 	dest, err := ref.NewImageDestination(context.Background(), nil)
 	assert.NoError(t, err)
 	defer dest.Close()
-}
-
-func TestReferenceOCILayoutPath(t *testing.T) {
-	ref, tmpDir := refToTempOCI(t, false)
-	ociRef, ok := ref.(ociReference)
-	require.True(t, ok)
-	assert.Equal(t, tmpDir+"/oci-layout", ociRef.ociLayoutPath())
-}
-
-func TestReferenceIndexPath(t *testing.T) {
-	ref, tmpDir := refToTempOCI(t, false)
-	ociRef, ok := ref.(ociReference)
-	require.True(t, ok)
-	assert.Equal(t, tmpDir+"/index.json", ociRef.indexPath())
-}
-
-func TestReferenceBlobPath(t *testing.T) {
-	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-	ref, tmpDir := refToTempOCI(t, false)
-	ociRef, ok := ref.(ociReference)
-	require.True(t, ok)
-	bp, err := ociRef.blobPath("sha256:"+hex, "")
-	assert.NoError(t, err)
-	assert.Equal(t, tmpDir+"/blobs/sha256/"+hex, bp)
-}
-
-func TestReferenceSharedBlobPathShared(t *testing.T) {
-	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-	ref, _ := refToTempOCI(t, false)
-	ociRef, ok := ref.(ociReference)
-	require.True(t, ok)
-	bp, err := ociRef.blobPath("sha256:"+hex, "/external/path")
-	assert.NoError(t, err)
-	assert.Equal(t, "/external/path/sha256/"+hex, bp)
-}
-
-func TestReferenceBlobPathInvalid(t *testing.T) {
-	const hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-	ref, _ := refToTempOCI(t, false)
-	ociRef, ok := ref.(ociReference)
-	require.True(t, ok)
-	_, err := ociRef.blobPath(hex, "")
-	assert.ErrorContains(t, err, "unexpected digest reference "+hex)
 }

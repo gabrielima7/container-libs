@@ -35,7 +35,7 @@ func TestReferenceDeleteImage_onlyOneImage(t *testing.T) {
 	// Check that the index is empty as there is only one image in the fixture
 	ociRef, ok := ref.(ociReference)
 	require.True(t, ok)
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	require.NoError(t, err)
 	require.Equal(t, 0, len(index.Manifests))
 }
@@ -58,7 +58,7 @@ func TestReferenceDeleteImage_onlyOneImage_emptyImageName(t *testing.T) {
 	// Check that the index is empty as there is only one image in the fixture
 	ociRef, ok := ref.(ociReference)
 	require.True(t, ok)
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	require.NoError(t, err)
 	require.Equal(t, 0, len(index.Manifests))
 }
@@ -88,7 +88,7 @@ func TestReferenceDeleteImage_sharedBlobDir(t *testing.T) {
 	// Check that the index is empty as there is only one image in the fixture
 	ociRef, ok := ref.(ociReference)
 	require.True(t, ok)
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	require.NoError(t, err)
 	require.Equal(t, 0, len(index.Manifests))
 }
@@ -123,7 +123,7 @@ func TestReferenceDeleteImage_multipleImages(t *testing.T) {
 	ociRef, ok := ref.(ociReference)
 	require.True(t, ok)
 	// .. Check that the index has been reduced to the correct size
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	require.NoError(t, err)
 	require.Equal(t, 6, len(index.Manifests))
 	// .. Check that the image is not in the index anymore
@@ -152,7 +152,7 @@ func TestReferenceDeleteImage_multipleImages_blobsUsedByOtherImages(t *testing.T
 	ociRef, ok := ref.(ociReference)
 	require.True(t, ok)
 	// .. Check that the index has been reduced to the correct size
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	require.NoError(t, err)
 	require.Equal(t, 6, len(index.Manifests))
 	// .. Check that the image is not in the index anymore
@@ -205,7 +205,7 @@ func TestReferenceDeleteImage_multipleImages_nestedIndexImage(t *testing.T) {
 	ociRef, ok := ref.(ociReference)
 	require.True(t, ok)
 	// .. Check that the index has been reduced to the correct size
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	require.NoError(t, err)
 	require.Equal(t, 6, len(index.Manifests))
 	// .. Check that the image is not in the index anymore
@@ -231,7 +231,7 @@ func TestReferenceDeleteImage_multipleImages_nestedIndexImage_refWithSameContent
 	ociRef, ok := ref.(ociReference)
 	require.True(t, ok)
 	// .. Check that the index has been reduced to the correct size
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	require.NoError(t, err)
 	require.Equal(t, 6, len(index.Manifests))
 }
@@ -258,7 +258,7 @@ func TestReferenceDeleteImage_multipleImages_twoIdenticalReferences(t *testing.T
 	ociRef, ok := ref.(ociReference)
 	require.True(t, ok)
 	// .. Check that the index has been reduced to the correct size
-	index, err := ociRef.getIndex()
+	index, err := destGetIndex(ociRef)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(index.Manifests))
 }
