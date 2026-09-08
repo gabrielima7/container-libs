@@ -5,7 +5,11 @@ package archive
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCopyFileWithInvalidDest(t *testing.T) {
@@ -85,4 +89,21 @@ func TestChmodTarEntry(t *testing.T) {
 			t.Fatalf("wrong chmod. expected:%v got:%v", v.expected, out)
 		}
 	}
+}
+
+// assertSameFile asserts that fi1 and fi2 refer to two links to the same underlying file.
+func assertSameFile(t *testing.T, fi1, fi2 os.FileInfo) {
+	// We don’t know, so don’t fail.
+}
+
+// assertCtimeMatches asserts that fi1 and fi2 have the same ctime.
+func assertCtimeMatches(t *testing.T, fi1, fi2 os.FileInfo) {
+	// We don’t know, so don’t fail.
+}
+
+func assertAtime(t *testing.T, atime time.Time, fi os.FileInfo) {
+	t.Helper()
+	attrs := fi.Sys().(*syscall.Win32FileAttributeData)
+	ts := syscall.NsecToTimespec(attrs.LastAccessTime.Nanoseconds())
+	assert.Equal(t, atime, time.Unix(int64(ts.Sec), int64(ts.Nsec)))
 }

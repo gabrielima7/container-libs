@@ -18,9 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	securejoin "github.com/cyphar/filepath-securejoin"
 	gzip "github.com/klauspost/pgzip"
 	"github.com/sirupsen/logrus"
 	"github.com/ulikunitz/xz"
+	"go.podman.io/storage/internal/createpath"
 	"go.podman.io/storage/pkg/fileutils"
 	"go.podman.io/storage/pkg/idtools"
 	"go.podman.io/storage/pkg/pools"
@@ -753,6 +755,9 @@ func (ta *tarWriter) addFile(root *os.Root, headers *addFileData) error {
 	return nil
 }
 
+// path must not exist (unless it is a directory and hdr also specifies a directory)
+// If hdr specifies a hard link, it is interpreted relative to extractDir (as the root to which the
+// tar extraction should be confined to); but path might not be inside extractDir!
 func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Reader, Lchown bool, chownOpts *idtools.IDPair, inUserns, ignoreChownErrors bool, forceMask *os.FileMode, buffer []byte) error {
 	// hdr.Mode is in linux format, which we can use for sycalls,
 	// but for os.Foo() calls we need the mode converted to os.FileMode,
@@ -761,6 +766,7 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 
 	typeFlag := hdr.Typeflag
 	mask := hdrInfo.Mode()
+	var hardlinkTargetPath string
 
 	// update also the implementation of ForceMask in pkg/chunked
 	if forceMask != nil {
@@ -811,25 +817,43 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 		}
 
 	case tar.TypeLink:
-		targetPath := filepath.Join(extractDir, hdr.Linkname)
-		// check for hardlink breakout
-		if !strings.HasPrefix(targetPath, extractDir) {
-			return breakoutError(fmt.Errorf("invalid hardlink %q -> %q", targetPath, hdr.Linkname))
+		// Check for hardlink breakout. This is INSUFFICIENT as a check if the path includes symlinks;
+		// we preserve it only to keep the existing restrictions on acceptable inputs.
+		insecureTargetPath := filepath.Join(extractDir, hdr.Linkname)
+		if insecureTargetPath != extractDir {
+			insecureExpectedPrefix := extractDir
+			if insecureExpectedPrefix != string(os.PathSeparator) {
+				insecureExpectedPrefix += string(os.PathSeparator)
+			}
+			if !strings.HasPrefix(insecureTargetPath, insecureExpectedPrefix) {
+				return breakoutError(fmt.Errorf("invalid hardlink %q", hdr.Linkname))
+			}
 		}
+
+		targetHdrDir, targetHdrBase, err := createpath.SplitPath(hdr.Linkname)
+		if err != nil {
+			return err
+		}
+		targetParentPath, err := securejoin.SecureJoin(extractDir, targetHdrDir)
+		if err != nil {
+			return err
+		}
+		targetPath := filepath.Join(targetParentPath, targetHdrBase) // Warning: this can refer to an existing (and escaping) symlink
 		if err := handleLLink(targetPath, path); err != nil {
 			return err
 		}
+		hardlinkTargetPath = targetPath
 
 	case tar.TypeSymlink:
-		// 	path 				-> hdr.Linkname = targetPath
-		// e.g. /extractDir/path/to/symlink 	-> ../2/file	= /extractDir/path/2/file
-		targetPath := filepath.Join(filepath.Dir(path), hdr.Linkname)
-
-		// the reason we don't need to check symlinks in the path (with FollowSymlinkInScope) is because
-		// that symlink would first have to be created, which would be caught earlier, at this very check:
-		if !strings.HasPrefix(targetPath, extractDir) {
-			return breakoutError(fmt.Errorf("invalid symlink %q -> %q", path, hdr.Linkname))
-		}
+		// Yes, this allows arbitrary symlinks: absolute, relative to existing files, relative dangling,
+		// relative and escaping the target directory.
+		//
+		// The callers who extract the archive are expected to constrain path lookup to avoid escaping symlinks,
+		// if relevant for their use case.
+		//
+		// Previously this code attempted to restrict escaping symlinks, but that code was flawed and possible to bypass;
+		// OTOH storing non-path data in symlinks is generally legitimate enough, and because the previous code was flawed,
+		// callers have always had to constrain path lookup after extracting the archive.
 		if err := os.Symlink(hdr.Linkname, path); err != nil {
 			return err
 		}
@@ -859,7 +883,7 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 
 	// There is no LChmod, so ignore mode for symlink. Also, this
 	// must happen after chown, as that can modify the file mode
-	if err := handleLChmod(hdr, path, hdrInfo, forceMask); err != nil {
+	if err := handleLChmod(hdr, path, hardlinkTargetPath, hdrInfo, forceMask); err != nil {
 		return err
 	}
 
@@ -871,7 +895,7 @@ func extractTarFileEntry(path, extractDir string, hdr *tar.Header, reader io.Rea
 
 	// system.Chtimes doesn't support a NOFOLLOW flag atm
 	if hdr.Typeflag == tar.TypeLink {
-		if fi, err := os.Lstat(hdr.Linkname); err == nil && (fi.Mode()&os.ModeSymlink == 0) {
+		if fi, err := os.Lstat(hardlinkTargetPath); err == nil && (fi.Mode()&os.ModeSymlink == 0) {
 			if err := system.Chtimes(path, aTime, hdr.ModTime); err != nil {
 				return err
 			}
@@ -1167,6 +1191,11 @@ func Unpack(decompressedArchive io.Reader, dest string, options *TarOptions) err
 	}
 	var rootHdr *tar.Header
 
+	// This is required because path = securejoin.SecureJoin(dest, ...) implicitly Clean()s
+	// the result, and we later use a (path == dest) comparison.
+	// Alternatively, we could compute filepath.Rel(dest, path) == ".", but that would
+	// be more expensive (filepath.Rel starts with two Clean calls).
+	dest = filepath.Clean(dest)
 	// Iterate through the files in the archive.
 loop:
 	for {
@@ -1179,9 +1208,16 @@ loop:
 			return err
 		}
 
-		// Normalize name, for safety and for a simple is-root check
-		// This keeps "../" as-is, but normalizes "/../" to "/". Or Windows:
-		// This keeps "..\" as-is, but normalizes "\..\" to "\".
+		// Normalize name. This does NOT allow us to infer useful security properties
+		// (does this escape "dest"?) from the string syntax, because the path may include
+		// arbitrary (possibly escaping) symlinks.
+		//
+		// We continue to do this primarily to preserve the semantics of ExcludePatterns.
+		// DO NOT add any more code that makes it user-visible whether we Clean hdr.Name;
+		// almost all filesystem operations should instead use "path" below.
+		//
+		// This keeps ".." and "../…" as-is, but normalizes "/../" to "/". Or Windows:
+		// This keeps ".." and "..\…" as-is, but normalizes "\..\" to "\".
 		hdr.Name = filepath.Clean(hdr.Name)
 
 		for _, exclude := range options.ExcludePatterns {
@@ -1190,13 +1226,47 @@ loop:
 			}
 		}
 
-		// After calling filepath.Clean(hdr.Name) above, hdr.Name will now be in
-		// the filepath format for the OS on which the daemon is running. Hence
-		// the check for a slash-suffix MUST be done in an OS-agnostic way.
-		if !strings.HasSuffix(hdr.Name, string(os.PathSeparator)) {
+		// This check is INSUFFICIENT to detect breakouts if hdr.Name contains symlink parents;
+		// we preserve it only to keep the existing restrictions on acceptable inputs.
+		insecureRel, err := filepath.Rel(dest, filepath.Join(dest, hdr.Name))
+		if err != nil {
+			return err
+		}
+		if insecureRel == ".." || strings.HasPrefix(insecureRel, ".."+string(os.PathSeparator)) {
+			return breakoutError(fmt.Errorf("%q is outside of %q", hdr.Name, dest))
+		}
+
+		// This does not detect attempts to break out, it just silently restricts them to dest.
+		// We could use os.Root to create files instead — that fails on breakout attempts, but
+		// Go does not include all operations we need as of Go 1.25, so that would be a larger
+		// change — and as of Go 1.26 (which does not use openat2 and the like yet) it would
+		// ultimately be more expensive, we would be repeatedly getting a handle to hdrDir in order
+		// to make *at syscalls.
+		hdrDir, hdrBase, err := createpath.SplitPath(hdr.Name)
+		if err != nil {
+			return err
+		}
+		parentPath, err := securejoin.SecureJoin(dest, hdrDir)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(parentPath, hdrBase) // Warning: this can refer to an existing (and escaping) symlink
+
+		if path == dest {
+			// The caller has probably pre-created dest as a directory; we don’t know for sure, and it doesn’t really matter
+			// because SecureJoin works fine enough for non-existent paths, and because the "Not the root directory"
+			// code path below would create dest if necessary.
+			//
+			// The one thing we MUST NOT allow is creating "dest" as a symbolic link, because SecureJoin’s operation implicitly
+			// resolves that symlink before constraining the returned path.  We also must not allow replacing an existing directory
+			// with a symbolic link.
+			//
+			// Just refuse all non-directory paths here.
+			if hdr.Typeflag != tar.TypeDir {
+				return fmt.Errorf("refusing to act on a non-directory entry as the archive root")
+			}
+		} else {
 			// Not the root directory, ensure that the parent directory exists
-			parent := filepath.Dir(hdr.Name)
-			parentPath := filepath.Join(dest, parent)
 			if err := fileutils.Lexists(parentPath); err != nil && os.IsNotExist(err) {
 				err = idtools.MkdirAllAndChownNew(parentPath, 0o777, rootIDs)
 				if err != nil {
@@ -1205,37 +1275,26 @@ loop:
 			}
 		}
 
-		path := filepath.Join(dest, hdr.Name)
-		rel, err := filepath.Rel(dest, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
+		if path == dest {
 			rootHdr = hdr
-		}
-		if strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return breakoutError(fmt.Errorf("%q is outside of %q", hdr.Name, dest))
 		}
 
 		// If path exits we almost always just want to remove and replace it
 		// The only exception is when it is a directory *and* the file from
 		// the layer is also a directory. Then we want to merge them (i.e.
 		// just apply the metadata from the layer).
+		// (Above, we have already refused to replace all of dest with a non-directory.)
 		if fi, err := os.Lstat(path); err == nil {
 			if options.NoOverwriteDirNonDir && fi.IsDir() && hdr.Typeflag != tar.TypeDir {
 				// If NoOverwriteDirNonDir is true then we cannot replace
 				// an existing directory with a non-directory from the archive.
-				return overwriteError(fmt.Errorf("cannot overwrite directory %q with non-directory %q", path, dest))
+				return overwriteError(fmt.Errorf("cannot overwrite directory %q with non-directory in %q", path, dest))
 			}
 
 			if options.NoOverwriteDirNonDir && !fi.IsDir() && hdr.Typeflag == tar.TypeDir {
 				// If NoOverwriteDirNonDir is true then we cannot replace
 				// an existing non-directory with a directory from the archive.
-				return overwriteError(fmt.Errorf("cannot overwrite non-directory %q with directory %q", path, dest))
-			}
-
-			if fi.IsDir() && hdr.Name == "." {
-				continue
+				return overwriteError(fmt.Errorf("cannot overwrite non-directory %q with directory in %q", path, dest))
 			}
 
 			if !fi.IsDir() || hdr.Typeflag != tar.TypeDir {
@@ -1251,7 +1310,11 @@ loop:
 			return err
 		}
 
-		if whiteoutConverter != nil {
+		if whiteoutConverter != nil && path != dest {
+			// The path != dest check guards against a corner case where dest
+			// uses a whiteout-related base name.
+			// ConvertRead is only allowed to create files within parent(path) and
+			// ensures it does not follow symlinks when creating them.
 			writeFile, err := whiteoutConverter.ConvertRead(hdr, path)
 			if err != nil {
 				return err
@@ -1277,9 +1340,28 @@ loop:
 	}
 
 	for _, hdr := range dirs {
-		path := filepath.Join(dest, hdr.Name)
+		// We did create a directory at hdr.Name, but later entries in the tar archive
+		// could have replaced hdr.Name or any of its parents with a different file / file kind.
+		// So we don’t actually know that hdr.Name refers to a directory; in particular it might
+		// be a (possibly escaping) symlink.
+		hdrDir, hdrBase, err := createpath.SplitPath(hdr.Name)
+		if err != nil {
+			return err
+		}
+		parentPath, err := securejoin.SecureJoin(dest, hdrDir)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(parentPath, hdrBase) // Warning: this can refer to an existing (and escaping) symlink
 
-		if err := system.Chtimes(path, hdr.AccessTime, hdr.ModTime); err != nil {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() {
+			continue // The directory was replaced; whatever happened here, hdr is no longer relevant.
+		}
+		if err := system.Chtimes(path, hdr.AccessTime, hdr.ModTime); err != nil { // Note: follows symlinks
 			return err
 		}
 		if err := WriteFileFlagsFromTarHeader(path, hdr); err != nil {

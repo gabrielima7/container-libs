@@ -3,6 +3,7 @@ package archive
 import (
 	"archive/tar"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -165,11 +166,17 @@ func (o overlayWhiteoutConverter) convertWriteWithGetxattr(hdr *tar.Header, fi o
 }
 
 func (overlayWhiteoutConverter) ConvertReadWithHandler(hdr *tar.Header, path string, handler TarWhiteoutHandler) (bool, error) {
+	// ConvertReadWithHandler is only allowed to create files within parent(path) (whatever
+	// that resolves to), and must ensure it does not follow symlinks when creating files
+	// within that directory.
+
 	base := filepath.Base(path)
 	dir := filepath.Dir(path)
 
 	// if a directory is marked as opaque by the AUFS special file, we need to translate that to overlay
 	if base == WhiteoutOpaqueDir {
+		// Note that this follows symlinks: it’s up to the caller to ensure "dir" == parent(path)
+		// is acceptable.
 		err := handler.Setxattr(dir, getOverlayOpaqueXattrName(), []byte{'y'})
 		// don't write the file itself
 		return false, err
@@ -177,8 +184,12 @@ func (overlayWhiteoutConverter) ConvertReadWithHandler(hdr *tar.Header, path str
 
 	// if a file was deleted and we are using overlay, we need to create a character device
 	if originalBase, ok := strings.CutPrefix(base, WhiteoutPrefix); ok {
+		if isInvalidWhiteoutTargetBaseName(originalBase) {
+			return false, fmt.Errorf("invalid whiteout path %q", path)
+		}
 		originalPath := filepath.Join(dir, originalBase)
 
+		// Mknod fails with EEXIST if the target is a symlink, so this should be safe.
 		if err := handler.Mknod(originalPath, unix.S_IFCHR, 0); err != nil {
 			// If someone does:
 			//     rm -rf /foo/bar
@@ -219,6 +230,9 @@ func (d directHandler) Chown(path string, uid, gid int) error {
 }
 
 func (o overlayWhiteoutConverter) ConvertRead(hdr *tar.Header, path string) (bool, error) {
+	// ConvertRead is only allowed to create files within parent(path) and
+	// must ensure it does not follow symlinks when creating them.
+
 	var handler directHandler
 	return o.ConvertReadWithHandler(hdr, path, handler)
 }
@@ -240,13 +254,14 @@ func GetFileOwner(path string) (uint32, uint32, uint32, error) {
 	return 0, 0, uint32(f.Mode()), nil
 }
 
-func handleLChmod(hdr *tar.Header, path string, hdrInfo os.FileInfo, forceMask *os.FileMode) error {
+func handleLChmod(hdr *tar.Header, path string, hardlinkTargetPath string, hdrInfo os.FileInfo, forceMask *os.FileMode) error {
 	permissionsMask := hdrInfo.Mode()
 	if forceMask != nil {
 		permissionsMask = *forceMask
 	}
+
 	if hdr.Typeflag == tar.TypeLink {
-		if fi, err := os.Lstat(hdr.Linkname); err == nil && (fi.Mode()&os.ModeSymlink == 0) {
+		if fi, err := os.Lstat(hardlinkTargetPath); err == nil && (fi.Mode()&os.ModeSymlink == 0) {
 			if err := os.Chmod(path, permissionsMask); err != nil {
 				return err
 			}

@@ -8,25 +8,48 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-var testUntarFns = map[string]func(string, io.Reader) error{
-	"untar": func(dest string, r io.Reader) error {
-		return Untar(r, dest, nil)
-	},
-	"applylayer": func(dest string, r io.Reader) error {
-		_, err := ApplyLayer(dest, r)
-		return err
-	},
+func breakoutUntar(dest string, r io.Reader) error {
+	return Untar(r, dest, nil)
+}
+
+func breakoutUnpack(dest string, r io.Reader) error {
+	return Unpack(r, dest, &TarOptions{})
+}
+
+func breakoutApplyLayer(dest string, r io.Reader) error {
+	_, err := ApplyLayer(dest, r)
+	return err
+}
+
+// tarStream returns a reader for a tar stream containing the provided headers,
+// with each header first updated by editor.
+func tarStream(t *testing.T, headers []*tar.Header, editor func(*tar.Header)) io.Reader {
+	reader, writer := io.Pipe()
+	go func() {
+		tw := tar.NewWriter(writer)
+		for _, hdr := range headers {
+			hdr := *hdr
+			editor(&hdr)
+			err := tw.WriteHeader(&hdr)
+			require.NoError(t, err)
+		}
+		tw.Close()
+		writer.Close()
+	}()
+	return reader
 }
 
 // testBreakout is a helper function that, within the provided `tmpdir` directory,
 // creates a `victim` folder with a generated `hello` file in it.
 // `untar` extracts to a directory named `dest`, the tar file created from `headers`.
+// `headers` may contain a @TOP@ placeholder in .Linkname, pointing to a parent of `victim`.
 //
 // Here are the tested scenarios:
 // - removed `victim` folder				(write)
@@ -36,7 +59,7 @@ var testUntarFns = map[string]func(string, io.Reader) error{
 // - file in `dest` with same content as `victim/hello` (read)
 //
 // When using testBreakout make sure you cover one of the scenarios listed above.
-func testBreakout(t *testing.T, untarFn string, headers []*tar.Header) error {
+func testBreakout(t *testing.T, untarFn func(string, io.Reader) error, headers []*tar.Header) error {
 	tmpdir := t.TempDir()
 
 	dest := filepath.Join(tmpdir, "dest")
@@ -61,25 +84,15 @@ func testBreakout(t *testing.T, untarFn string, headers []*tar.Header) error {
 		return err
 	}
 
-	reader, writer := io.Pipe()
-	go func() {
-		tw := tar.NewWriter(writer)
-		for _, hdr := range headers {
-			err := tw.WriteHeader(hdr)
-			require.NoError(t, err)
-		}
-		tw.Close()
-	}()
+	reader := tarStream(t, headers, func(hdr *tar.Header) {
+		hdr.Linkname = strings.Replace(hdr.Linkname, "@TOP@", tmpdir, 1)
+	})
 
-	untar := testUntarFns[untarFn]
-	if untar == nil {
-		return fmt.Errorf("could not find untar function %q in testUntarFns", untarFn)
-	}
-	if err := untar(dest, reader); err != nil {
+	if err := untarFn(dest, reader); err != nil {
 		if _, ok := err.(breakoutError); !ok {
 			// If untar returns an error unrelated to an archive breakout,
 			// then consider this an unexpected error and abort.
-			return err
+			return fmt.Errorf("non-breakout untar error: %w", err)
 		}
 		// Here, untar detected the breakout.
 		// Let's move on verifying that indeed there was no breakout.
@@ -121,7 +134,7 @@ func testBreakout(t *testing.T, untarFn string, headers []*tar.Header) error {
 	defer f.Close()
 	b, err := io.ReadAll(f)
 	if err != nil {
-		return err
+		return fmt.Errorf("reading hello %q: %w", hello, err)
 	}
 	fi, err := f.Stat()
 	if err != nil {
@@ -153,10 +166,17 @@ func testBreakout(t *testing.T, untarFn string, headers []*tar.Header) error {
 			// skip file if error
 			return nil //nolint: nilerr
 		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			// Not following escaping symlinks is the responsibility of the caller of untar.
+			// An ideal caller of untar would be using os.Root.ReadFile, but that does not return
+			// an externally-detectable error type when encountering an escaping symlink;
+			// so, check separately
+			return nil
+		}
 		b, err := os.ReadFile(path)
 		if err != nil {
 			// Houston, we have a problem. Aborting (space)walk.
-			return err
+			return fmt.Errorf("reading %q inside archive: %w", path, err)
 		}
 		if bytes.Equal(helloData, b) {
 			return fmt.Errorf("archive breakout: file %q has been accessed via %q", hello, path)
