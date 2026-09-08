@@ -10,7 +10,7 @@ import (
 )
 
 // prepareFiles creates files for testing in the temp directory
-func prepareFiles(t *testing.T) (string, string, string) {
+func prepareFiles(t *testing.T) (string, string, string, string) {
 	dir := t.TempDir()
 
 	file := filepath.Join(dir, "exist")
@@ -25,11 +25,11 @@ func prepareFiles(t *testing.T) (string, string, string) {
 		t.Fatal(err)
 	}
 
-	return file, invalid, symlink
+	return dir, file, invalid, symlink
 }
 
 func TestLUtimesNano(t *testing.T) {
-	file, invalid, symlink := prepareFiles(t)
+	_, file, invalid, symlink := prepareFiles(t)
 
 	before, err := os.Stat(file)
 	if err != nil {

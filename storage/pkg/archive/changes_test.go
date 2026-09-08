@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.podman.io/storage/pkg/idtools"
 	"go.podman.io/storage/pkg/system"
@@ -34,7 +35,7 @@ const (
 	Symlink
 )
 
-type FileData struct {
+type sampleData struct {
 	filetype    FileType
 	path        string
 	contents    string
@@ -54,8 +55,38 @@ var sampleReadOnlyMode = func() os.FileMode {
 	return 0o404
 }()
 
+// populateDir populates (possibly non-empty) dest with contents, setting the timestamp for all files and dirs to timestamp.
+func populateDir(t *testing.T, dest string, timestamp time.Time, contents []sampleData) {
+	for _, info := range contents {
+		p := path.Join(dest, info.path)
+		switch info.filetype {
+		case Dir:
+			err := os.MkdirAll(p, info.permissions)
+			require.NoError(t, err)
+		case Regular:
+			err := os.WriteFile(p, []byte(info.contents), info.permissions)
+			require.NoError(t, err)
+		case Symlink:
+			err := os.Symlink(info.contents, p)
+			require.NoError(t, err)
+
+			err = resetSymlinkTimes(p)
+			require.NoError(t, err)
+
+		default:
+			t.Fatalf("unknown filetype: %d", info.filetype)
+		}
+
+		if info.filetype != Symlink {
+			// Set a consistent ctime, atime for all files and dirs
+			err := system.Chtimes(p, timestamp, timestamp)
+			require.NoError(t, err)
+		}
+	}
+}
+
 func createSampleDir(t *testing.T, root string) {
-	files := []FileData{
+	populateDir(t, root, time.Now(), []sampleData{
 		{Regular, "file1", "file1\n", 0o600},
 		{Regular, "file2", "file2\n", 0o666},
 		{Regular, "file3", "file3\n", sampleReadOnlyMode},
@@ -80,32 +111,8 @@ func createSampleDir(t *testing.T, root string) {
 		{Symlink, "symlink3", root + "/file1", 0o666},
 		{Symlink, "symlink4", root + "/symlink3", 0o666},
 		{Symlink, "dirSymlink", root + "/dir1", 0o740},
-	}
-
-	now := time.Now()
-	for _, info := range files {
-		p := path.Join(root, info.path)
-		switch info.filetype {
-		case Dir:
-			err := os.MkdirAll(p, info.permissions)
-			require.NoError(t, err)
-		case Regular:
-			err := os.WriteFile(p, []byte(info.contents), info.permissions)
-			require.NoError(t, err)
-		case Symlink:
-			err := os.Symlink(info.contents, p)
-			require.NoError(t, err)
-
-			err = resetSymlinkTimes(p)
-			require.NoError(t, err)
-		}
-
-		if info.filetype != Symlink {
-			// Set a consistent ctime, atime for all files and dirs
-			err := system.Chtimes(p, now, now)
-			require.NoError(t, err)
-		}
-	}
+		{Symlink, "escapingSymlink", root + "/../../../../../../../etc/shadow", 0o666},
+	})
 }
 
 func TestChangeString(t *testing.T) {
@@ -246,6 +253,37 @@ func TestChangesWithChangesGH13590(t *testing.T) {
 		{"/dir1/dir2/dir3/file.txt", ChangeModify},
 	}
 	checkChanges(t, expectedChanges, changes)
+}
+
+func TestChangesParentWhiteouts(t *testing.T) {
+	layer1 := t.TempDir()
+	populateDir(t, layer1, time.Now(), []sampleData{
+		{Regular, "file1", "file1\n", 0o600},
+		{Dir, "dir2", "", 0o700},
+		{Regular, "dir2/file2", "file2\n", 0o600},
+	})
+
+	layer2 := t.TempDir()
+	populateDir(t, layer2, time.Now(), []sampleData{
+		{Regular, ".wh.file1", "", 0o600},
+		{Regular, ".wh.dir2", "", 0o600},
+	})
+
+	layer3 := t.TempDir()
+	populateDir(t, layer3, time.Now(), []sampleData{
+		{Regular, "file1", "file1-new\n", 0o600},
+		{Dir, "dir2", "", 0o700},
+		{Regular, "dir2/file2", "file2-new\n", 0o600},
+	})
+
+	changes, err := Changes([]string{layer2, layer1}, layer3)
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []Change{
+		{"/file1", ChangeAdd},
+		{"/dir2", ChangeAdd},
+		{"/dir2/file2", ChangeAdd},
+	}, changes)
 }
 
 // Create a directory, copy it, make sure we report no changes between the two
@@ -438,14 +476,16 @@ func TestChangesSizeWithHardlinks(t *testing.T) {
 	changes, err := ChangesDirs(destDir, &idtools.IDMappings{}, srcDir, &idtools.IDMappings{})
 	require.NoError(t, err)
 
-	got := ChangesSize(destDir, changes)
+	got, err := ChangesSizeWithError(destDir, changes)
+	require.NoError(t, err)
 	if got != int64(creationSize) {
 		t.Errorf("Expected %d bytes of changes, got %d", creationSize, got)
 	}
 }
 
 func TestChangesSizeWithNoChanges(t *testing.T) {
-	size := ChangesSize("/tmp", nil)
+	size, err := ChangesSizeWithError("/tmp", nil)
+	require.NoError(t, err)
 	if size != 0 {
 		t.Fatalf("ChangesSizes with no changes should be 0, was %d", size)
 	}
@@ -455,7 +495,8 @@ func TestChangesSizeWithOnlyDeleteChanges(t *testing.T) {
 	changes := []Change{
 		{Path: "deletedPath", Kind: ChangeDelete},
 	}
-	size := ChangesSize("/tmp", changes)
+	size, err := ChangesSizeWithError("/tmp", changes)
+	require.NoError(t, err)
 	if size != 0 {
 		t.Fatalf("ChangesSizes with only delete changes should be 0, was %d", size)
 	}
@@ -474,7 +515,8 @@ func TestChangesSize(t *testing.T) {
 		{Path: "addition", Kind: ChangeAdd},
 		{Path: "modification", Kind: ChangeModify},
 	}
-	size := ChangesSize(parentPath, changes)
+	size, err := ChangesSizeWithError(parentPath, changes)
+	require.NoError(t, err)
 	if size != 6 {
 		t.Fatalf("Expected 6 bytes of changes, got %d", size)
 	}
