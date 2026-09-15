@@ -5,10 +5,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.podman.io/storage/pkg/fileutils"
 	"go.podman.io/storage/pkg/system"
 	"golang.org/x/sys/unix"
 )
@@ -64,7 +68,9 @@ func setupOverlayLowerDir(t *testing.T, lower string) {
 func checkOpaqueness(t *testing.T, path string, opaque string) {
 	xattrOpaque, err := system.Lgetxattr(path, getOverlayOpaqueXattrName())
 	require.NoError(t, err)
-
+	if opaque == "" {
+		assert.Nil(t, xattrOpaque)
+	}
 	if string(xattrOpaque) != opaque {
 		t.Fatalf("Unexpected opaque value: %q, expected %q", string(xattrOpaque), opaque)
 	}
@@ -200,4 +206,271 @@ func TestNestedOverlayWhiteouts(t *testing.T) {
 	})
 	require.NoError(t, err)
 	checkFileMode(t, filepath.Join(dst, "foo"), os.ModeDevice|os.ModeCharDevice)
+}
+
+func TestOverlayWhiteoutConverterConvertRead(t *testing.T) {
+	converter := GetWhiteoutConverter(OverlayWhiteoutFormat, nil)
+	convertRead := func(path string) (bool, error) {
+		// This hard-codes assumptions about which fields the implementation cares about.
+		return converter.ConvertRead(&tar.Header{
+			Typeflag: tar.TypeReg,
+			Name:     path,
+			Uid:      os.Geteuid(),
+			Gid:      os.Getegid(),
+		}, path)
+	}
+
+	t.Run("non-whiteout", func(t *testing.T) {
+		dest := t.TempDir()
+		writeFile, err := convertRead(filepath.Join(dest, "file"))
+		require.NoError(t, err)
+		assert.True(t, writeFile)
+
+		checkOpaqueness(t, dest, "")
+	})
+	t.Run("opaque directory", func(t *testing.T) {
+		dest := t.TempDir()
+		whiteoutPath := dest + "/.wh..wh..opq"
+		writeFile, err := convertRead(whiteoutPath)
+		require.NoError(t, err)
+		assert.False(t, writeFile)
+
+		checkOpaqueness(t, dest, "y")
+		err = fileutils.Lexists(whiteoutPath)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrNotExist)
+	})
+	t.Run("opaque directory error", func(t *testing.T) {
+		dest := t.TempDir()
+		dir := filepath.Join(dest, "dir") // intentionally not created
+		whiteoutPath := dir + "/.wh..wh..opq"
+		_, err := convertRead(whiteoutPath)
+		require.Error(t, err)
+		for _, path := range []string{dir, whiteoutPath} {
+			err = fileutils.Lexists(path)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		}
+	})
+
+	t.Run("whiteout", func(t *testing.T) {
+		dest := t.TempDir()
+		whiteoutPath := filepath.Join(dest, ".wh.file")
+		writeFile, err := convertRead(whiteoutPath)
+		require.NoError(t, err)
+		assert.False(t, writeFile)
+		checkFileMode(t, filepath.Join(dest, "file"), os.ModeDevice|os.ModeCharDevice)
+		err = fileutils.Lexists(whiteoutPath)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrNotExist)
+	})
+	// Invalid whiteout base name
+	for _, suffix := range []string{"", ".", ".."} {
+		t.Run(suffix, func(t *testing.T) {
+			dest := t.TempDir()
+			whiteoutRelPath := ".wh." + suffix
+			_, err := convertRead(filepath.Join(dest, whiteoutRelPath))
+			assert.Error(t, err)
+			err = fileutils.Lexists(filepath.Join(dest, whiteoutRelPath))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+	// Whiteout over an existing file
+	t.Run("whiteout over regular file", func(t *testing.T) {
+		dest := t.TempDir()
+		err := os.WriteFile(filepath.Join(dest, "file"), []byte("content"), 0o600)
+		require.NoError(t, err)
+		_, err = convertRead(filepath.Join(dest, ".wh.file"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrExist)
+	})
+	// Whiteout over an existing symlink
+	t.Run("whiteout over symlink", func(t *testing.T) {
+		victim := t.TempDir()
+		fi1, err := os.Lstat(victim)
+		require.NoError(t, err)
+		dest := t.TempDir()
+		err = os.Symlink(victim, filepath.Join(dest, "symlink"))
+		require.NoError(t, err)
+		_, err = convertRead(filepath.Join(dest, ".wh.symlink"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrExist)
+		// victim was not affected
+		fi2, err := os.Lstat(victim)
+		require.NoError(t, err)
+		assertCtimeMatches(t, fi1, fi2)
+	})
+	// Whiteout inside whiteout
+	t.Run("whiteout inside whiteout", func(t *testing.T) {
+		dest := t.TempDir()
+		writeFile, err := convertRead(filepath.Join(dest, ".wh.dir"))
+		require.NoError(t, err)
+		assert.False(t, writeFile)
+		writeFile, err = convertRead(filepath.Join(dest, "dir", ".wh.file"))
+		require.NoError(t, err)
+		assert.False(t, writeFile)
+		checkFileMode(t, filepath.Join(dest, "dir"), os.ModeDevice|os.ModeCharDevice)
+	})
+}
+
+func TestUnpackWhiteouts(t *testing.T) {
+	hdrEditor := func(hdr *tar.Header) {
+		hdr.Uid = os.Getuid()
+		hdr.Gid = os.Getgid()
+	}
+
+	// WhiteoutOpaqueDir
+	for _, path := range []string{"dir", "."} {
+		t.Run(path, func(t *testing.T) {
+			dest := t.TempDir()
+			whiteoutRelPath := path + "/.wh..wh..opq"
+			reader := tarStream(t, []*tar.Header{
+				{Typeflag: tar.TypeDir, Name: "dir", Mode: 0o700},
+				{Typeflag: tar.TypeReg, Name: whiteoutRelPath, Mode: 0o600},
+			}, hdrEditor)
+			err := Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+			require.NoError(t, err)
+			opaquePath := filepath.Join(dest, path)
+			checkOpaqueness(t, opaquePath, "y")
+			var otherDir string
+			switch strings.TrimPrefix(opaquePath, dest) {
+			case "/dir":
+				otherDir = dest
+			case "":
+				otherDir = filepath.Join(dest, "dir")
+			default:
+				t.Fatalf("Unexpected directory: %s", opaquePath)
+			}
+			checkOpaqueness(t, otherDir, "")
+			err = fileutils.Lexists(filepath.Join(dest, whiteoutRelPath))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+	// WhiteoutOpaqueDir without an explicit parent directory entry
+	// happens to work, because we create the parent as if we were going to create
+	// a regular file.
+	t.Run("opaque missing", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "dir/.wh..wh..opq", Mode: 0o600},
+		}, hdrEditor)
+		err := Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+		require.NoError(t, err)
+		fi, err := os.Lstat(filepath.Join(dest, "dir"))
+		require.NoError(t, err)
+		assert.True(t, fi.IsDir())
+		checkOpaqueness(t, filepath.Join(dest, "dir"), "y")
+	})
+	// WhiteoutOpaqueDir targeting a symlink
+	t.Run("opaque symlink", func(t *testing.T) {
+		victim := t.TempDir()
+		dest := t.TempDir()
+		symlinkPath := filepath.Join(dest, "symlink")
+		err := os.Symlink(victim, symlinkPath)
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "symlink/.wh..wh..opq", Mode: 0o600},
+		}, hdrEditor)
+		err = Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+		require.NoError(t, err)
+		checkOpaqueness(t, victim, "") // The target of an escaping symlink is unaffected
+		// The symlink path is interpreted as a missing parent directory within dest, and created:
+		// Warning: tar archives which use symlinks within parent directories are questionably
+		// valid (they are never created through a “normal” archive creation process), we don’t
+		// promise this will continue to work.
+		symlinkResult := filepath.Join(dest, victim)
+		fi, err := os.Lstat(symlinkResult)
+		require.NoError(t, err)
+		assert.True(t, fi.IsDir())
+		checkOpaqueness(t, symlinkResult, "y")
+		// The symlink itself is not affected.
+		checkOpaqueness(t, symlinkPath, "")
+	})
+
+	// Ordinary whiteout
+	t.Run("whiteout", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: ".wh.file", Mode: 0o600},
+		}, hdrEditor)
+		err := Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+		require.NoError(t, err)
+		checkFileMode(t, filepath.Join(dest, "file"), os.ModeDevice|os.ModeCharDevice)
+		err = fileutils.Lexists(filepath.Join(dest, ".wh.file"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrNotExist)
+	})
+	// Invalid whiteout base name
+	for _, suffix := range []string{"", ".", ".."} {
+		t.Run(suffix, func(t *testing.T) {
+			dest := t.TempDir()
+			whiteoutRelPath := ".wh." + suffix
+			reader := tarStream(t, []*tar.Header{
+				{Typeflag: tar.TypeReg, Name: whiteoutRelPath, Mode: 0o600},
+			}, hdrEditor)
+			err := Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+			assert.Error(t, err)
+			err = fileutils.Lexists(filepath.Join(dest, whiteoutRelPath))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+	// Whiteout over an existing file
+	t.Run("whiteout over regular file", func(t *testing.T) {
+		dest := t.TempDir()
+		err := os.WriteFile(filepath.Join(dest, "file"), []byte("content"), 0o600)
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: ".wh.file", Mode: 0o600},
+		}, hdrEditor)
+		err = Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrExist)
+	})
+	// Whiteout over an existing symlink
+	t.Run("whiteout over symlink", func(t *testing.T) {
+		victim := t.TempDir()
+		fi1, err := os.Lstat(victim)
+		require.NoError(t, err)
+		dest := t.TempDir()
+		err = os.Symlink(victim, filepath.Join(dest, "symlink"))
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: ".wh.symlink", Mode: 0o600},
+		}, hdrEditor)
+		err = Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrExist)
+		// victim was not affected
+		fi2, err := os.Lstat(victim)
+		require.NoError(t, err)
+		assertCtimeMatches(t, fi1, fi2)
+	})
+	// Whiteout inside whiteout
+	t.Run("whiteout inside whiteout", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: ".wh.dir", Mode: 0o600},
+			{Typeflag: tar.TypeReg, Name: "dir/.wh.file", Mode: 0o600},
+		}, hdrEditor)
+		err := Unpack(reader, dest, &TarOptions{WhiteoutFormat: OverlayWhiteoutFormat})
+		require.NoError(t, err)
+		checkFileMode(t, filepath.Join(dest, "dir"), os.ModeDevice|os.ModeCharDevice)
+	})
+}
+
+// assertCtimeMatches asserts that fi1 and fi2 have the same ctime.
+func assertCtimeMatches(t *testing.T, fi1, fi2 os.FileInfo) {
+	t.Helper()
+	st1 := fi1.Sys().(*syscall.Stat_t)
+	st2 := fi2.Sys().(*syscall.Stat_t)
+	assert.Equal(t, st1.Ctim, st2.Ctim)
+}
+
+func assertAtime(t *testing.T, atime time.Time, fi os.FileInfo) {
+	t.Helper()
+	st := fi.Sys().(*syscall.Stat_t)
+	assert.Equal(t, atime, time.Unix(st.Atim.Sec, st.Atim.Nsec))
 }

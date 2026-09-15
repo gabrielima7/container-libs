@@ -1,3 +1,7 @@
+//go:build !windows
+
+// This might have been intended to be cross-platform, but as of 2026-05 it doesn’t compile on Windows.
+
 package chrootarchive
 
 import (

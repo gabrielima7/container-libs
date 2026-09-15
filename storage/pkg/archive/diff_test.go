@@ -2,16 +2,570 @@ package archive
 
 import (
 	"archive/tar"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.podman.io/storage/pkg/fileutils"
 	"go.podman.io/storage/pkg/ioutils"
 )
+
+func TestUnpackLayer(t *testing.T) {
+	hdrEditor := func(hdr *tar.Header) {
+		hdr.Uid = os.Getuid()
+		hdr.Gid = os.Getgid()
+	}
+
+	// A smoke test; TestExtractTarFileEntry tests that the correct kinds of individual files are created, with the right properties.
+	dest := t.TempDir()
+	reader := tarStream(t, []*tar.Header{
+		{Typeflag: tar.TypeDir, Name: "dir", Mode: 0o700},
+		{Typeflag: tar.TypeReg, Name: "regular", Mode: 0o600},
+		// tar.TypeBlock, tar.typeChar untested because they require root privileges
+		{Typeflag: tar.TypeFifo, Name: "fifo", Mode: 0o600},
+		{Typeflag: tar.TypeLink, Name: "link", Linkname: "regular", Mode: 0o600},
+		{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "dangling/local/target", Mode: 0o700},
+	}, hdrEditor)
+	_, err := UnpackLayer(dest, reader, nil)
+	assert.NoError(t, err)
+
+	// Paths are confined to the destination
+	for i, headers := range [][]*tar.Header{
+		{ // Direct overwrite
+			{Typeflag: tar.TypeReg, Name: "../victim/hello", Mode: 0o600},
+		},
+		{ // Overwrite through an escaping symlink to directory
+			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "../victim", Mode: 0o755},
+			{Typeflag: tar.TypeReg, Name: "symlink/hello", Mode: 0o600},
+		},
+		{ // Overwrite through an absolute symlink to directory
+			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "@TOP@/victim", Mode: 0o644},
+			{Typeflag: tar.TypeReg, Name: "symlink/hello", Mode: 0o600},
+		},
+		{ // Overwrite through symlink to directory using paths that _look_ innocuous
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c", Linkname: "../..", Mode: 0o755}, // Points at the root
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c/d", Linkname: "..", Mode: 0o755},  // = root/..
+			{Typeflag: tar.TypeReg, Name: "a/b/c/d/victim/hello", Mode: 0o600},
+		},
+		{ // Overwrite through an escaping symlink directly to victim
+			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "../victim/hello", Mode: 0o755},
+			{Typeflag: tar.TypeReg, Name: "symlink", Mode: 0o600},
+		},
+		{ // Overwrite through an absolute symlink directly to victim
+			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: "@TOP@/victim/hello", Mode: 0o644},
+			{Typeflag: tar.TypeReg, Name: "symlink", Mode: 0o600},
+		},
+		{ // Overwrite through symlink directly to victim using paths that _look_ innocuous
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c", Linkname: "../..", Mode: 0o755},                   // Points at the root
+			{Typeflag: tar.TypeSymlink, Name: "a/b/c/symlink", Linkname: "../victim/hello", Mode: 0o755}, // = root/../victim/hello
+			{Typeflag: tar.TypeReg, Name: "a/b/c/symlink", Mode: 0o600},
+		},
+	} {
+		t.Run(fmt.Sprintf("Breakout%d", i), func(t *testing.T) {
+			err := testBreakout(t, breakoutUnpack, headers)
+			assert.NoError(t, err)
+		})
+	}
+	// Symbolic links are interpreted relative to the destination.
+	t.Run("symlinks", func(t *testing.T) {
+		dest := t.TempDir()
+		for i := range []int{1, 2} {
+			err := os.Mkdir(filepath.Join(dest, fmt.Sprintf("dir%d", i)), 0o700)
+			require.NoError(t, err)
+		}
+		err := os.Symlink("../../../dir2", filepath.Join(dest, "dir1", "relative"))
+		require.NoError(t, err)
+		err = os.Symlink("/dir2", filepath.Join(dest, "dir1", "absolute"))
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "dir1/relative/through-relative", Mode: 0o600},
+			{Typeflag: tar.TypeReg, Name: "dir1/absolute/through-absolute", Mode: 0o600},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		assert.NoError(t, err)
+		assert.FileExists(t, filepath.Join(dest, "dir2", "through-relative"))
+		assert.FileExists(t, filepath.Join(dest, "dir2", "through-absolute"))
+	})
+
+	// The destination must not be created/replaced as a non-directory.
+	for _, preexisting := range []bool{true, false} {
+		for _, destSuffix := range []string{"", "/"} {
+			for _, rootName := range []string{".", "/"} {
+				t.Run(fmt.Sprintf("symlink root dest=%s, preexisting=%t, root=%s", destSuffix, preexisting, rootName), func(t *testing.T) {
+					victim := t.TempDir()
+					victimFile := filepath.Join(victim, "file")
+					err := os.WriteFile(victimFile, []byte("content"), 0o600)
+					require.NoError(t, err)
+					fis := map[string]os.FileInfo{}
+					for _, path := range []string{victim, victimFile} {
+						fi, err := os.Lstat(path)
+						require.NoError(t, err)
+						fis[path] = fi
+					}
+
+					dest := filepath.Join(t.TempDir(), "dest")
+					if preexisting {
+						err := os.Mkdir(dest, 0o700)
+						require.NoError(t, err)
+					}
+
+					reader := tarStream(t, []*tar.Header{
+						{Typeflag: tar.TypeSymlink, Name: rootName, Linkname: victim, Mode: 0o700},
+						{Typeflag: tar.TypeReg, Name: filepath.Join(rootName, "file"), Mode: 0o600},
+					}, hdrEditor)
+					_, err = UnpackLayer(dest+destSuffix, reader, nil)
+					require.Error(t, err)
+
+					if preexisting {
+						fi, err := os.Lstat(dest)
+						require.NoError(t, err)
+						assert.True(t, fi.IsDir())
+					}
+					// The victim paths were not affected
+					for _, path := range []string{victim, victimFile} {
+						fi, err := os.Lstat(path)
+						require.NoError(t, err)
+						assertCtimeMatches(t, fi, fis[path])
+					}
+				})
+
+				// TypeDir entries for dest are accepted.
+				t.Run(fmt.Sprintf("dir root dest=%s, preexisting=%t, dir=%s", destSuffix, preexisting, rootName), func(t *testing.T) {
+					dest := filepath.Join(t.TempDir(), "dest")
+					if preexisting {
+						err := os.Mkdir(dest, 0o700)
+						require.NoError(t, err)
+					}
+
+					reader := tarStream(t, []*tar.Header{
+						{Typeflag: tar.TypeDir, Name: rootName, Mode: 0o700},
+						{Typeflag: tar.TypeReg, Name: filepath.Join(rootName, "file"), Mode: 0o600},
+					}, hdrEditor)
+					_, err := UnpackLayer(dest+destSuffix, reader, nil)
+					require.NoError(t, err)
+
+					fi, err := os.Lstat(dest)
+					require.NoError(t, err)
+					assert.True(t, fi.IsDir())
+				})
+			}
+		}
+	}
+
+	// Parent directory is automatically created
+	for _, c := range []struct {
+		relDest, fileName string
+		dirs              []string // relative to the temporary directory, not relDest (e.g. can be relDest)
+	}{
+		{relDest: ".", fileName: "file", dirs: []string{"."}},                                            // Pre-existing destination
+		{relDest: ".", fileName: "dir/file", dirs: []string{".", "dir"}},                                 // Directory within the destination
+		{relDest: "nonexistent", fileName: "file", dirs: []string{"nonexistent"}},                        // Even the destination may be created
+		{relDest: "nonexistent", fileName: "dir/file", dirs: []string{"nonexistent", "nonexistent/dir"}}, // Destination + dir within both created
+	} {
+		t.Run(c.relDest+"|"+c.fileName, func(t *testing.T) {
+			top := t.TempDir()
+			reader := tarStream(t, []*tar.Header{
+				{Typeflag: tar.TypeReg, Name: c.fileName, Mode: 0o600},
+			}, hdrEditor)
+			dest := filepath.Join(top, c.relDest) // No Mkdir(dest)!
+			_, err := UnpackLayer(dest, reader, nil)
+			assert.NoError(t, err)
+			fi, err := os.Lstat(filepath.Join(dest, c.fileName))
+			require.NoError(t, err)
+			assert.True(t, fi.Mode().IsRegular())
+			for _, dir := range c.dirs {
+				fi, err := os.Lstat(filepath.Join(top, dir))
+				require.NoError(t, err)
+				assert.True(t, fi.IsDir())
+			}
+		})
+	}
+
+	t.Run("unused plnk", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: ".wh..wh.plnk/file", Mode: 0o600},
+		}, hdrEditor)
+		_, err := UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		assertDirIsPLNKOnly(t, dest)
+	})
+	t.Run("invalid plnk", func(t *testing.T) {
+		// This actually triggers the “can’t replace dest with a non-directory” code:
+		// we happen to never enter the plnk code path for this input, because
+		// we filepath.Clean() it and that removes the .wh..wh.plnk prefix we look for.
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: ".wh..wh.plnk/..", Mode: 0o600},
+		}, hdrEditor)
+		_, err := UnpackLayer(dest, reader, nil)
+		assert.Error(t, err)
+		contents := readdirNames(t, dest)
+		assert.Empty(t, contents)
+	})
+	t.Run("a non-regular-file plnk", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeFifo, Name: ".wh..wh.plnk/fifo", Mode: 0o700},
+			{Typeflag: tar.TypeLink, Name: "fifo-link", Linkname: ".wh..wh.plnk/fifo", Mode: 0o600},
+		}, hdrEditor)
+		_, err := UnpackLayer(dest, reader, nil)
+		assert.Error(t, err)
+		assertDirIsPLNKOnly(t, dest)
+	})
+	t.Run("valid plnk", func(t *testing.T) {
+		dest := t.TempDir()
+		plinkPath := ".wh..wh.plnk/file"
+		reader, writer := io.Pipe()
+		go func() {
+			tw := tar.NewWriter(writer)
+			for _, contents := range []string{"contents1", "contents 2 with a different length"} {
+				hdr := tar.Header{Typeflag: tar.TypeReg, Name: plinkPath, Size: int64(len(contents)), Mode: 0o700}
+				hdrEditor(&hdr)
+				err := tw.WriteHeader(&hdr)
+				require.NoError(t, err)
+				_, err = tw.Write([]byte(contents))
+				require.NoError(t, err)
+			}
+			hdr := tar.Header{Typeflag: tar.TypeLink, Name: "file-link", Linkname: plinkPath, Mode: 0o600}
+			hdrEditor(&hdr)
+			err := tw.WriteHeader(&hdr)
+			require.NoError(t, err)
+			tw.Close()
+			writer.Close()
+		}()
+
+		_, err := UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		contents := readdirNames(t, dest)
+		assert.Equal(t, []string{".wh..wh.plnk", "file-link"}, contents)
+		contents = readdirNames(t, filepath.Join(dest, ".wh..wh.plnk"))
+		assert.Empty(t, contents)
+		fi, err := os.Lstat(filepath.Join(dest, "file-link"))
+		require.NoError(t, err)
+		assert.True(t, fi.Mode().IsRegular()) // The current implementation does not actually create hard links
+		data, err := os.ReadFile(filepath.Join(dest, "file-link"))
+		require.NoError(t, err)
+		assert.Equal(t, []byte("contents 2 with a different length"), data)
+	})
+
+	// Other archive members with WhiteoutMetaPrefix are ignored
+	t.Run("unrecognized metadata prefix", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: ".wh..wh.something_else", Mode: 0o600},
+		}, hdrEditor)
+		_, err := UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		contents := readdirNames(t, dest)
+		assert.Empty(t, contents)
+	})
+
+	// WhiteoutOpaqueDir
+	for _, path := range []string{"dir", "."} {
+		t.Run(path, func(t *testing.T) {
+			victimDir := t.TempDir()
+			victim := filepath.Join(victimDir, "victim")
+			err := os.WriteFile(victim, []byte("content"), 0o600)
+			require.NoError(t, err)
+			fi1, err := os.Lstat(victim)
+			require.NoError(t, err)
+
+			dest := t.TempDir()
+			err = os.Mkdir(filepath.Join(dest, "dir"), 0o700)
+			require.NoError(t, err)
+			for _, subdir := range []string{".", "dir"} {
+				err := os.WriteFile(filepath.Join(dest, subdir, "oldfile"), []byte("content"), 0o600)
+				require.NoError(t, err)
+				err = os.Symlink(victim, filepath.Join(dest, subdir, "oldsymlink"))
+				require.NoError(t, err)
+			}
+			whiteoutRelPath := path + "/.wh..wh..opq"
+			reader := tarStream(t, []*tar.Header{
+				{Typeflag: tar.TypeReg, Name: "newfile", Mode: 0o600},
+				{Typeflag: tar.TypeSymlink, Name: "newsymlink", Linkname: victim, Mode: 0o700},
+				{Typeflag: tar.TypeReg, Name: "dir/newfile", Mode: 0o600},
+				{Typeflag: tar.TypeSymlink, Name: "dir/newsymlink", Linkname: victim, Mode: 0o700},
+				{Typeflag: tar.TypeReg, Name: whiteoutRelPath, Mode: 0o600},
+			}, hdrEditor)
+			_, err = UnpackLayer(dest, reader, nil)
+			require.NoError(t, err)
+			// The opaque directory exists but was pre-existing files were removed.
+			opaquePath := filepath.Join(dest, path)
+			fi, err := os.Lstat(opaquePath)
+			require.NoError(t, err)
+			assert.True(t, fi.IsDir())
+			contents := readdirNames(t, opaquePath)
+			assert.Equal(t, []string{"newfile", "newsymlink"}, contents)
+			// No other files were affected
+			if opaquePath != dest {
+				contents := readdirNames(t, dest)
+				assert.Equal(t, []string{"dir", "newfile", "newsymlink", "oldfile", "oldsymlink"}, contents)
+			}
+
+			err = fileutils.Lexists(filepath.Join(dest, whiteoutRelPath))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+			// Symlink targets were not modified in any way
+			fi2, err := os.Lstat(victim)
+			require.NoError(t, err)
+			assertCtimeMatches(t, fi1, fi2)
+		})
+	}
+	// WhiteoutOpaqueDir without an explicit parent directory entry
+	// happens to work, because we create the parent as if we were going to create
+	// a regular file.
+	t.Run("opaque missing", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "dir/.wh..wh..opq", Mode: 0o600},
+		}, hdrEditor)
+		_, err := UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		fi, err := os.Lstat(filepath.Join(dest, "dir"))
+		require.NoError(t, err)
+		assert.True(t, fi.IsDir())
+	})
+	// WhiteoutOpaqueDir targeting a symlink
+	t.Run("opaque symlink", func(t *testing.T) {
+		victim := t.TempDir()
+		err := os.WriteFile(filepath.Join(victim, "file"), []byte("content"), 0o600)
+		require.NoError(t, err)
+		dest := t.TempDir()
+		symlinkPath := filepath.Join(dest, "symlink")
+		err = os.Symlink(victim, symlinkPath)
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "symlink/.wh..wh..opq", Mode: 0o600},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		contents := readdirNames(t, victim)
+		assert.Equal(t, []string{"file"}, contents) // The target of an escaping symlink is unaffected
+		// The symlink path is interpreted as a missing parent directory within dest, and created:
+		// Warning: tar archives which use symlinks within parent directories are questionably
+		// valid (they are never created through a “normal” archive creation process), we don’t
+		// promise this will continue to work.
+		symlinkResult := filepath.Join(dest, victim)
+		fi, err := os.Lstat(symlinkResult)
+		require.NoError(t, err)
+		assert.True(t, fi.IsDir())
+		// The symlink itself is not affected.
+		fi, err = os.Lstat(symlinkPath)
+		require.NoError(t, err)
+		assert.True(t, fi.Mode()&os.ModeSymlink != 0)
+	})
+
+	// Ordinary whiteout
+	t.Run("whiteout over nothing", func(t *testing.T) {
+		dest := t.TempDir()
+		err := os.WriteFile(filepath.Join(dest, "unaffected"), []byte("content"), 0o600)
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: ".wh.nonexistent", Mode: 0o600},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		contents := readdirNames(t, dest)
+		assert.Equal(t, []string{"unaffected"}, contents)
+	})
+	// Invalid whiteout base name
+	for _, suffix := range []string{"", ".", ".."} {
+		for _, dir := range []string{".", "dir"} {
+			t.Run(dir+"/"+suffix, func(t *testing.T) {
+				dest := t.TempDir()
+				whiteoutRelPath := dir + "/.wh." + suffix
+				reader := tarStream(t, []*tar.Header{
+					{Typeflag: tar.TypeDir, Name: dir, Mode: 0o700},
+					{Typeflag: tar.TypeReg, Name: whiteoutRelPath, Mode: 0o600},
+				}, hdrEditor)
+				_, err := UnpackLayer(dest, reader, nil)
+				assert.Error(t, err)
+				err = fileutils.Lexists(filepath.Join(dest, whiteoutRelPath))
+				require.Error(t, err)
+				assert.ErrorIs(t, err, os.ErrNotExist)
+				// The parent directory was not affected
+				fi, err := os.Lstat(filepath.Join(dest, dir))
+				require.NoError(t, err)
+				assert.True(t, fi.IsDir())
+			})
+		}
+	}
+	// Whiteout over an existing file
+	t.Run("whiteout over regular file", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "unaffected", Mode: 0o600},
+			{Typeflag: tar.TypeReg, Name: "file", Mode: 0o600},
+			{Typeflag: tar.TypeReg, Name: ".wh.file", Mode: 0o600},
+		}, hdrEditor)
+		_, err := UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		contents := readdirNames(t, dest)
+		assert.Equal(t, []string{"unaffected"}, contents)
+	})
+	// Whiteout over an existing directory
+	t.Run("whiteout over directory", func(t *testing.T) {
+		dest := t.TempDir()
+		// Create it separately, otherwise UnpackLayer tries to change its times at the very end, after it is already gone.
+		err := os.Mkdir(filepath.Join(dest, "dir"), 0o700)
+		require.NoError(t, err)
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeReg, Name: "unaffected", Mode: 0o600},
+			{Typeflag: tar.TypeReg, Name: ".wh.dir", Mode: 0o600},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		contents := readdirNames(t, dest)
+		assert.Equal(t, []string{"unaffected"}, contents)
+	})
+	// Whiteout over an existing symlink
+	t.Run("whiteout over symlink", func(t *testing.T) {
+		victim := t.TempDir()
+		fi1, err := os.Lstat(victim)
+		require.NoError(t, err)
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeSymlink, Name: "symlink", Linkname: victim, Mode: 0o700},
+			{Typeflag: tar.TypeReg, Name: ".wh.symlink", Mode: 0o600},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		require.NoError(t, err)
+		contents := readdirNames(t, dest)
+		assert.Empty(t, contents)
+		// victim was not affected
+		fi2, err := os.Lstat(victim)
+		require.NoError(t, err)
+		assertCtimeMatches(t, fi1, fi2)
+	})
+	// Whiteout using a metadata prefix, in a subdirectory, is not treated specially.
+	for _, whiteoutName := range []string{".wh..wh.plnk", ".wh..wh.something_else"} {
+		t.Run("whiteout "+whiteoutName+" in subdirectory", func(t *testing.T) {
+			dest := t.TempDir()
+			reader := tarStream(t, []*tar.Header{
+				{Typeflag: tar.TypeReg, Name: "dir/unaffected", Mode: 0o600},
+				{Typeflag: tar.TypeReg, Name: "dir/" + strings.TrimPrefix(whiteoutName, ".wh."), Mode: 0o600},
+				{Typeflag: tar.TypeReg, Name: "dir/" + whiteoutName, Mode: 0o600},
+			}, hdrEditor)
+			_, err := UnpackLayer(dest, reader, nil)
+			require.NoError(t, err)
+			contents := readdirNames(t, filepath.Join(dest, "dir"))
+			assert.Equal(t, []string{"unaffected"}, contents)
+		})
+	}
+
+	// Overwriting pre-existing files
+	for _, c := range []struct {
+		tarTypes     []byte
+		expectedType fs.FileMode
+	}{
+		{tarTypes: []byte{tar.TypeReg, tar.TypeReg}, expectedType: fs.FileMode(0)}, // reg -> reg
+		{tarTypes: []byte{tar.TypeDir, tar.TypeDir}, expectedType: fs.ModeDir},     // dir -> dir
+		{tarTypes: []byte{tar.TypeReg, tar.TypeDir}, expectedType: fs.ModeDir},     // reg -> dir
+		{tarTypes: []byte{tar.TypeDir, tar.TypeReg}, expectedType: fs.FileMode(0)}, // dir -> reg
+	} {
+		t.Run("", func(t *testing.T) {
+			dest := t.TempDir()
+			hdrs := []*tar.Header{}
+			for _, tarType := range c.tarTypes {
+				hdrs = append(hdrs, &tar.Header{Typeflag: tarType, Name: "test", Mode: 0o700})
+			}
+			reader := tarStream(t, hdrs, hdrEditor)
+			_, err := UnpackLayer(dest, reader, nil)
+			require.NoError(t, err)
+			fi, err := os.Lstat(filepath.Join(dest, "test"))
+			require.NoError(t, err)
+			assert.Equal(t, c.expectedType, fi.Mode().Type())
+		})
+	}
+
+	// Resolving plnk hard links has been mostly tested above.
+	t.Run("dangling plnk", func(t *testing.T) {
+		dest := t.TempDir()
+		reader := tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeLink, Name: "link", Linkname: ".wh..wh.plnk/never-created", Mode: 0o600},
+		}, hdrEditor)
+		_, err := UnpackLayer(dest, reader, nil)
+		assert.Error(t, err)
+		contents := readdirNames(t, dest)
+		assert.Empty(t, contents)
+	})
+
+	// Directory times are set correctly even if we create files inside them.
+	mtime := time.Unix(1, 0)
+	atime := time.Unix(2, 0)
+	t.Run("directory times", func(t *testing.T) {
+		dest = t.TempDir()
+		// An explicit FormatPAX is necessary, otherwise archive/tar prefers to use a simpler header which does not encode AccessTime,
+		reader = tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeDir, Name: "dir", Mode: 0o700, ModTime: mtime, AccessTime: atime, Format: tar.FormatPAX},
+			{Typeflag: tar.TypeReg, Name: "dir/inside", Mode: 0o600, ModTime: mtime, AccessTime: atime, Format: tar.FormatPAX},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		assert.NoError(t, err)
+		for _, path := range []string{"dir", "dir/inside"} {
+			t.Run(path, func(t *testing.T) {
+				fi, err := os.Lstat(filepath.Join(dest, path))
+				require.NoError(t, err)
+				assert.Equal(t, mtime, fi.ModTime())
+				assertAtime(t, atime, fi)
+			})
+		}
+	})
+	// The directory times code does not follow symlinks.
+	t.Run("directory times on symlink", func(t *testing.T) {
+		victim := t.TempDir()
+		fi1, err := os.Lstat(victim)
+		require.NoError(t, err)
+
+		dest = t.TempDir()
+		// An explicit FormatPAX is necessary, otherwise archive/tar prefers to use a simpler header which does not encode AccessTime,
+		reader = tarStream(t, []*tar.Header{
+			{Typeflag: tar.TypeDir, Name: "dir", Mode: 0o700, ModTime: mtime, AccessTime: atime, Format: tar.FormatPAX},
+			{Typeflag: tar.TypeSymlink, Name: "dir", Linkname: victim, Mode: 0o700},
+		}, hdrEditor)
+		_, err = UnpackLayer(dest, reader, nil)
+		assert.NoError(t, err)
+		fi, err := os.Lstat(filepath.Join(dest, "dir"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.ModeSymlink, fi.Mode().Type())
+
+		fi2, err := os.Lstat(victim)
+		require.NoError(t, err)
+		assertCtimeMatches(t, fi2, fi1)
+	})
+
+	// Setting BSD flags of directories is untested
+}
+
+func assertDirIsPLNKOnly(t *testing.T, dest string) {
+	// This accepts / “tests for” a pre-existing bug: we create the parent directory before treating plnk specially.
+	// This is NOT a commitment that the behavior will stay that way.
+	contents := readdirNames(t, dest)
+	assert.Equal(t, []string{".wh..wh.plnk"}, contents)
+	contents = readdirNames(t, filepath.Join(dest, ".wh..wh.plnk"))
+	assert.Empty(t, contents)
+}
+
+func readdirNames(t *testing.T, dir string) []string {
+	f, err := os.Open(dir)
+	require.NoError(t, err)
+	defer f.Close()
+	names, err := f.Readdirnames(0)
+	require.NoError(t, err)
+	slices.Sort(names)
+	return names
+}
 
 func TestApplyLayerInvalidFilenames(t *testing.T) {
 	// TODO Windows: Figure out how to fix this test.
@@ -35,7 +589,7 @@ func TestApplyLayerInvalidFilenames(t *testing.T) {
 			},
 		},
 	} {
-		if err := testBreakout(t, "applylayer", headers); err != nil {
+		if err := testBreakout(t, breakoutApplyLayer, headers); err != nil {
 			t.Fatalf("i=%d. %v", i, err)
 		}
 	}
@@ -117,10 +671,45 @@ func TestApplyLayerInvalidHardlink(t *testing.T) {
 				Mode:     0o644,
 			},
 		},
+		{ // Linking to paths that _look_ innocuous
+			{
+				Name:     "a/b/c",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "../..", // Points at the root
+				Mode:     0o755,
+			},
+			{
+				Name:     "a/b/c/d",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "..", // = root/..
+				Mode:     0o755,
+			},
+			{
+				Name:     "hardlink",
+				Typeflag: tar.TypeLink,
+				Linkname: "a/b/c/d/victim/hello",
+				Mode:     0o644,
+			},
+		},
+		{ // Linking through absolute symlinks
+			{
+				Name:     "symlink",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "@TOP@/victim",
+				Mode:     0o644,
+			},
+			{
+				Name:     "hardlink",
+				Typeflag: tar.TypeLink,
+				Linkname: "symlink/hello",
+				Mode:     0o644,
+			},
+		},
 	} {
-		if err := testBreakout(t, "applylayer", headers); err != nil {
-			t.Fatalf("i=%d. %v", i, err)
-		}
+		t.Run(fmt.Sprintf("i=%d", i), func(t *testing.T) {
+			err := testBreakout(t, breakoutApplyLayer, headers)
+			assert.NoError(t, err)
+		})
 	}
 }
 
@@ -200,10 +789,43 @@ func TestApplyLayerInvalidSymlink(t *testing.T) {
 				Mode:     0o644,
 			},
 		},
+		{ // Writing to paths that _look_ innocuous
+			{
+				Name:     "a/b/c",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "../..", // Points at the root
+				Mode:     0o755,
+			},
+			{
+				Name:     "a/b/c/d",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "..", // = root/..
+				Mode:     0o755,
+			},
+			{
+				Name:     "a/b/c/d/victim/hello",
+				Typeflag: tar.TypeReg,
+				Mode:     0o644,
+			},
+		},
+		{ // Writing through absolute symlinks
+			{
+				Name:     "symlink",
+				Typeflag: tar.TypeSymlink,
+				Linkname: "@TOP@/victim",
+				Mode:     0o644,
+			},
+			{
+				Name:     "symlink/hello",
+				Typeflag: tar.TypeReg,
+				Mode:     0o644,
+			},
+		},
 	} {
-		if err := testBreakout(t, "applylayer", headers); err != nil {
-			t.Fatalf("i=%d. %v", i, err)
-		}
+		t.Run(fmt.Sprintf("i=%d", i), func(t *testing.T) {
+			err := testBreakout(t, breakoutApplyLayer, headers)
+			assert.NoError(t, err)
+		})
 	}
 }
 
