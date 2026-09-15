@@ -2,7 +2,7 @@ module go.podman.io/common
 
 // Warning: Ensure the "go" and "toolchain" versions match exactly to prevent unwanted auto-updates
 
-go 1.24.2
+go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.5.0
@@ -44,7 +44,7 @@ require (
 	github.com/vishvananda/netlink v1.3.1
 	go.etcd.io/bbolt v1.4.3
 	go.podman.io/image/v5 v5.39.2
-	go.podman.io/storage v1.62.0
+	go.podman.io/storage v1.62.1
 	golang.org/x/crypto v0.43.0
 	golang.org/x/sync v0.17.0
 	golang.org/x/sys v0.37.0
@@ -113,7 +113,7 @@ require (
 	github.com/tchap/go-patricia/v2 v2.3.3 // indirect
 	github.com/titanous/rocacheck v0.0.0-20171023193734-afe73141d399 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
-	github.com/vbatts/tar-split v0.12.1 // indirect
+	github.com/vbatts/tar-split v0.12.3 // indirect
 	github.com/vbauerster/mpb/v8 v8.10.2 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
