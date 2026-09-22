@@ -11,7 +11,7 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-func TestIsWSLMirroredMode(t *testing.T) {
+func TestIsMirroredMode(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {

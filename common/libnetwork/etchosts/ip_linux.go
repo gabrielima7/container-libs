@@ -45,12 +45,6 @@ func currentWSLNetworkingMode() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// isWSLMirroredMode reports whether WSL is running in mirrored networking mode.
-func isWSLMirroredMode() bool {
-	mode, err := currentWSLNetworkingMode()
-	return isMirroredMode(mode, err)
-}
-
 // isMirroredMode checks if the given mode string and error indicate mirrored mode.
 func isMirroredMode(mode string, err error) bool {
 	if err != nil {
