@@ -51,6 +51,12 @@ func TestIsWSLMirroredMode(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "unsupported mode bridged",
+			mode:     "bridged",
+			err:      nil,
+			expected: false,
+		},
+		{
 			name:     "invalid mode string",
 			mode:     "unknown-mode",
 			err:      nil,
@@ -74,7 +80,7 @@ func TestIsWSLMirroredMode(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expected, isWSLMirroredMode(tt.mode, tt.err))
+			assert.Equal(t, tt.expected, isMirroredMode(tt.mode, tt.err))
 		})
 	}
 }
@@ -150,6 +156,21 @@ func TestResolveMirroredHostIP(t *testing.T) {
 		assert.Equal(t, "192.168.1.50", ip)
 	})
 
+	t.Run("interface fallback prefers subnet matching default gateway", func(t *testing.T) {
+		t.Parallel()
+		routeSrcGetter := func(gw net.IP) ([]netlink.Route, error) {
+			return nil, errors.New("no route")
+		}
+		ifaceAddrsGetter := func(index int) ([]net.Addr, error) {
+			return []net.Addr{
+				mockIPNet("10.0.0.5/24"),
+				mockIPNet("192.168.1.50/24"),
+			}, nil
+		}
+		ip := resolveMirroredHostIP(gwIP, 1, routeSrcGetter, ifaceAddrsGetter)
+		assert.Equal(t, "192.168.1.50", ip)
+	})
+
 	t.Run("interface only has loopback address returns empty", func(t *testing.T) {
 		t.Parallel()
 		routeSrcGetter := func(gw net.IP) ([]netlink.Route, error) {
@@ -177,55 +198,108 @@ func TestResolveWSLHostIP(t *testing.T) {
 	mirroredRouter := net.ParseIP("192.168.1.1")
 	windowsHostIP := net.ParseIP("192.168.1.100")
 
-	natRoutes := []netlink.Route{
+	routesWithGateway := func(gw net.IP) []netlink.Route {
+		return []netlink.Route{
+			{
+				Dst:       defaultDst,
+				Gw:        gw,
+				LinkIndex: 2,
+			},
+		}
+	}
+
+	tests := []struct {
+		name             string
+		routes           []netlink.Route
+		mode             string
+		routeSrcGetter   func(gw net.IP) ([]netlink.Route, error)
+		ifaceAddrsGetter func(index int) ([]net.Addr, error)
+		expected         string
+	}{
 		{
-			Dst:       defaultDst,
-			Gw:        natGateway,
-			LinkIndex: 2,
+			name:     "nat mode returns default gateway",
+			routes:   routesWithGateway(natGateway),
+			mode:     "nat",
+			expected: "172.28.0.1",
+		},
+		{
+			name:     "nat mode uppercase",
+			routes:   routesWithGateway(natGateway),
+			mode:     "NAT",
+			expected: "172.28.0.1",
+		},
+		{
+			name:   "mirrored mode resolves Windows host IP",
+			routes: routesWithGateway(mirroredRouter),
+			mode:   "mirrored",
+			routeSrcGetter: func(gw net.IP) ([]netlink.Route, error) {
+				return []netlink.Route{{Src: windowsHostIP}}, nil
+			},
+			expected: "192.168.1.100",
+		},
+		{
+			name:   "mirrored mode with unresolvable host returns empty string rather than router gateway",
+			routes: routesWithGateway(mirroredRouter),
+			mode:   "mirrored",
+			routeSrcGetter: func(gw net.IP) ([]netlink.Route, error) {
+				return nil, errors.New("unresolvable")
+			},
+			ifaceAddrsGetter: func(index int) ([]net.Addr, error) {
+				return nil, errors.New("no addresses")
+			},
+			expected: "",
+		},
+		{
+			name:     "unsupported mode virtioproxy returns empty string",
+			routes:   routesWithGateway(natGateway),
+			mode:     "virtioproxy",
+			expected: "",
+		},
+		{
+			name:     "unsupported mode bridged returns empty string",
+			routes:   routesWithGateway(natGateway),
+			mode:     "bridged",
+			expected: "",
+		},
+		{
+			name:     "unsupported mode none returns empty string",
+			routes:   routesWithGateway(natGateway),
+			mode:     "none",
+			expected: "",
+		},
+		{
+			name:     "empty mode returns empty string",
+			routes:   routesWithGateway(natGateway),
+			mode:     "",
+			expected: "",
+		},
+		{
+			name:     "empty routing table returns empty string",
+			routes:   nil,
+			mode:     "nat",
+			expected: "",
+		},
+		{
+			name: "no default route returns empty string",
+			routes: []netlink.Route{
+				{
+					Dst: mockIPNet("10.0.0.0/8"),
+					Gw:  net.ParseIP("10.0.0.1"),
+				},
+			},
+			mode:     "nat",
+			expected: "",
 		},
 	}
 
-	mirroredRoutes := []netlink.Route{
-		{
-			Dst:       defaultDst,
-			Gw:        mirroredRouter,
-			LinkIndex: 2,
-		},
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ip := resolveWSLHostIPWithMode(tt.routes, tt.mode, tt.routeSrcGetter, tt.ifaceAddrsGetter)
+			assert.Equal(t, tt.expected, ip)
+		})
 	}
-
-	t.Run("preserves NAT mode gateway behavior", func(t *testing.T) {
-		t.Parallel()
-		ip := resolveWSLHostIP(natRoutes, false, nil, nil)
-		assert.Equal(t, "172.28.0.1", ip)
-	})
-
-	t.Run("mirrored mode resolves Windows host IP", func(t *testing.T) {
-		t.Parallel()
-		routeSrcGetter := func(gw net.IP) ([]netlink.Route, error) {
-			return []netlink.Route{{Src: windowsHostIP}}, nil
-		}
-		ip := resolveWSLHostIP(mirroredRoutes, true, routeSrcGetter, nil)
-		assert.Equal(t, "192.168.1.100", ip)
-		assert.NotEqual(t, mirroredRouter.String(), ip)
-	})
-
-	t.Run("mirrored mode with unresolvable host returns empty string rather than router gateway", func(t *testing.T) {
-		t.Parallel()
-		routeSrcGetter := func(gw net.IP) ([]netlink.Route, error) {
-			return nil, errors.New("unresolvable")
-		}
-		ifaceAddrsGetter := func(index int) ([]net.Addr, error) {
-			return nil, errors.New("no addresses")
-		}
-		ip := resolveWSLHostIP(mirroredRoutes, true, routeSrcGetter, ifaceAddrsGetter)
-		assert.Empty(t, ip, "in mirrored mode, failure to resolve host IP must return empty string, never the router gateway")
-	})
-
-	t.Run("empty routing table returns empty string", func(t *testing.T) {
-		t.Parallel()
-		ip := resolveWSLHostIP(nil, false, nil, nil)
-		assert.Empty(t, ip)
-	})
 }
 
 func TestWSLHostIP(t *testing.T) {

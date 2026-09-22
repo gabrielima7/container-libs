@@ -1,45 +1,58 @@
 package etchosts
 
 import (
+	"context"
 	"net"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 )
 
-const defaultWSLRoute = "0.0.0.0/0"
+const (
+	defaultWSLRoute = "0.0.0.0/0"
+	wslinfoTimeout  = 2 * time.Second
+)
 
 // findWSLInfo returns the path to wslinfo. It checks PATH first,
-// and falls back to /usr/sbin/wslinfo (the standard symlink to /init in WSL)
-// in case /usr/sbin is not present in non-root or minimal PATH environments.
+// and falls back to /usr/bin/wslinfo (the standard symlink to /init in WSL)
+// in case /usr/bin is not present in PATH.
 func findWSLInfo() string {
 	if p, err := exec.LookPath("wslinfo"); err == nil {
 		return p
 	}
-	if _, err := os.Stat("/usr/sbin/wslinfo"); err == nil {
-		return "/usr/sbin/wslinfo"
+	if _, err := os.Stat("/usr/bin/wslinfo"); err == nil {
+		return "/usr/bin/wslinfo"
 	}
 	return ""
 }
 
-// defaultWSLNetworkingMode queries the active networking mode using wslinfo.
-func defaultWSLNetworkingMode() (string, error) {
+// currentWSLNetworkingMode queries the active networking mode using wslinfo.
+func currentWSLNetworkingMode() (string, error) {
 	bin := findWSLInfo()
 	if bin == "" {
 		return "", os.ErrNotExist
 	}
-	out, err := exec.Command(bin, "--networking-mode").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), wslinfoTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "--networking-mode").Output()
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-// isWSLMirroredMode parses mode output from wslinfo and checks if it equals "mirrored".
-func isWSLMirroredMode(mode string, err error) bool {
+// isWSLMirroredMode reports whether WSL is running in mirrored networking mode.
+func isWSLMirroredMode() bool {
+	mode, err := currentWSLNetworkingMode()
+	return isMirroredMode(mode, err)
+}
+
+// isMirroredMode checks if the given mode string and error indicate mirrored mode.
+func isMirroredMode(mode string, err error) bool {
 	if err != nil {
 		return false
 	}
@@ -47,16 +60,21 @@ func isWSLMirroredMode(mode string, err error) bool {
 }
 
 // resolveMirroredHostIP resolves the Windows host IP in WSL mirrored mode.
-// In mirrored mode, Windows network interfaces are mirrored into Linux.
-// Rather than using the default route gateway (which points to the upstream LAN router),
-// we resolve the local host IP associated with the default route interface.
+// In WSL mirrored networking mode, the Windows host network interfaces and addresses
+// are mirrored into the Linux environment. The default route gateway points to the
+// upstream LAN router rather than the Windows host.
 //
-// routeSrcGetter retrieves the route source for defaultGw (defaults to netlink.RouteGet).
-// ifaceAddrsGetter retrieves addresses on linkIndex (defaults to net.InterfaceByIndex).
+// To identify the Windows host IP:
+//  1. We query the Linux kernel routing table via RouteGet(defaultGw) for the
+//     preferred source IP (Src) selected to reach the default gateway. In mirrored
+//     mode, this source address corresponds to the local mirrored Windows host IP
+//     configured on that interface.
+//  2. If RouteGet source is unavailable, we inspect the default route interface
+//     and fall back to a global-unicast IPv4 address (preferring one on the gateway subnet).
 func resolveMirroredHostIP(
 	defaultGw net.IP,
 	linkIndex int,
-	routeSrcGetter func(gw net.IP) ([]netlink.Route, error),
+	routeSrcGetter func(destination net.IP) ([]netlink.Route, error),
 	ifaceAddrsGetter func(index int) ([]net.Addr, error),
 ) string {
 	// Strategy 1: Ask the kernel routing table for the preferred source IP
@@ -71,15 +89,24 @@ func resolveMirroredHostIP(
 		}
 	}
 
-	// Strategy 2: Fallback to the first global unicast IPv4 address assigned to the
-	// interface of the default route.
+	// Strategy 2: Fallback to an interface address on the default route's link.
+	// Prefer an address on the same subnet as the default gateway to remain route-consistent.
 	if linkIndex > 0 && ifaceAddrsGetter != nil {
 		addrs, err := ifaceAddrsGetter(linkIndex)
 		if err == nil {
+			var firstGlobalUnicast string
 			for _, addr := range addrs {
 				if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil && ipNet.IP.IsGlobalUnicast() {
-					return ipNet.IP.String()
+					if len(defaultGw) > 0 && ipNet.Contains(defaultGw) {
+						return ipNet.IP.String()
+					}
+					if firstGlobalUnicast == "" {
+						firstGlobalUnicast = ipNet.IP.String()
+					}
 				}
+			}
+			if firstGlobalUnicast != "" {
+				return firstGlobalUnicast
 			}
 		}
 	}
@@ -87,32 +114,66 @@ func resolveMirroredHostIP(
 	return ""
 }
 
-// resolveWSLHostIP encapsulates the IP selection logic for WSL.
-func resolveWSLHostIP(
+// resolveWSLRouteHostIP selects the host IP for a default route based on the WSL networking mode.
+func resolveWSLRouteHostIP(
+	r netlink.Route,
+	mode string,
+	routeSrcGetter func(destination net.IP) ([]netlink.Route, error),
+	ifaceAddrsGetter func(index int) ([]net.Addr, error),
+) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "nat":
+		return r.Gw.String()
+
+	case "mirrored":
+		hostIP := resolveMirroredHostIP(r.Gw, r.LinkIndex, routeSrcGetter, ifaceAddrsGetter)
+		if hostIP != "" {
+			return hostIP
+		}
+		// In mirrored mode, r.Gw is the upstream router gateway, NOT the Windows host.
+		// Returning r.Gw here would connect container traffic to the external network
+		// and cause port conflict (WSAEADDRINUSE) on Windows. Return empty string instead.
+		logrus.Warnf("Unable to determine Windows host IP in WSL mirrored mode")
+		return ""
+
+	default:
+		logrus.Warnf("Unsupported WSL networking mode: %q", mode)
+		return ""
+	}
+}
+
+// resolveWSLHostIPWithMode encapsulates route inspection and IP selection for a specific networking mode.
+func resolveWSLHostIPWithMode(
 	routes []netlink.Route,
-	isMirrored bool,
-	routeSrcGetter func(gw net.IP) ([]netlink.Route, error),
+	mode string,
+	routeSrcGetter func(destination net.IP) ([]netlink.Route, error),
 	ifaceAddrsGetter func(index int) ([]net.Addr, error),
 ) string {
 	for _, r := range routes {
 		if (r.Dst == nil || r.Dst.String() == defaultWSLRoute) && r.Gw != nil {
-			if isMirrored {
-				hostIP := resolveMirroredHostIP(r.Gw, r.LinkIndex, routeSrcGetter, ifaceAddrsGetter)
-				if hostIP != "" {
-					return hostIP
-				}
-				// In mirrored mode, r.Gw is the upstream router gateway, NOT the Windows host.
-				// Returning r.Gw here would connect container traffic to the external network
-				// and cause port conflict (WSAEADDRINUSE) on Windows. Return empty string instead.
-				logrus.Warnf("Unable to determine Windows host IP in WSL mirrored mode")
-				return ""
-			}
-			// In WSL NAT mode, the default route gateway represents the Windows host.
-			return r.Gw.String()
+			return resolveWSLRouteHostIP(r, mode, routeSrcGetter, ifaceAddrsGetter)
 		}
 	}
 	logrus.Warnf("No default route found in the WSL machine")
 	return ""
+}
+
+// resolveWSLHostIP determines the Windows host IP from routes and active WSL networking mode.
+func resolveWSLHostIP(routes []netlink.Route) string {
+	mode, err := currentWSLNetworkingMode()
+	if err != nil {
+		logrus.Warnf("Failed to get WSL networking mode: %v", err)
+		return ""
+	}
+	return resolveWSLHostIPWithMode(routes, mode, netlink.RouteGet, defaultInterfaceAddrs)
+}
+
+func defaultInterfaceAddrs(index int) ([]net.Addr, error) {
+	iface, err := net.InterfaceByIndex(index)
+	if err != nil {
+		return nil, err
+	}
+	return iface.Addrs()
 }
 
 // wslHostIP returns the Windows host's IP address. It only makes
@@ -132,20 +193,5 @@ func wslHostIP() string {
 		logrus.Warnf("Failed getting routes in the WSL machine: %v", err)
 		return ""
 	}
-
-	mode, modeErr := defaultWSLNetworkingMode()
-	isMirrored := isWSLMirroredMode(mode, modeErr)
-
-	routeSrcGetter := func(gw net.IP) ([]netlink.Route, error) {
-		return netlink.RouteGet(gw)
-	}
-	ifaceAddrsGetter := func(index int) ([]net.Addr, error) {
-		iface, err := net.InterfaceByIndex(index)
-		if err != nil {
-			return nil, err
-		}
-		return iface.Addrs()
-	}
-
-	return resolveWSLHostIP(routes, isMirrored, routeSrcGetter, ifaceAddrsGetter)
+	return resolveWSLHostIP(routes)
 }
