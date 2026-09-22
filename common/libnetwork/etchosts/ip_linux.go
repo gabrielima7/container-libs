@@ -18,14 +18,14 @@ const (
 )
 
 // findWSLInfo returns the path to wslinfo. It checks PATH first,
-// and falls back to /usr/bin/wslinfo (the standard symlink to /init in WSL)
-// in case /usr/bin is not present in PATH.
+// and falls back to /bin/wslinfo (created by WSL's /init) in case
+// PATH is minimal or does not include standard binary directories.
 func findWSLInfo() string {
 	if p, err := exec.LookPath("wslinfo"); err == nil {
 		return p
 	}
-	if _, err := os.Stat("/usr/bin/wslinfo"); err == nil {
-		return "/usr/bin/wslinfo"
+	if _, err := os.Stat("/bin/wslinfo"); err == nil {
+		return "/bin/wslinfo"
 	}
 	return ""
 }
